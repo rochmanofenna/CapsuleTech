@@ -1,0 +1,87 @@
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+.env
+*.venv
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+
+# =============================================================================
+# Build Artifacts (Rust, C++)
+# =============================================================================
+**/target/
+**/build/
+CMakeCache.txt
+CMakeFiles/
+*.o
+*.a
+*.so
+*.dll
+
+
+# =============================================================================
+# Output & Generated Artifacts
+# =============================================================================
+# Ignore the main output directory for all pipelines and benchmarks
+out/
+
+# Ignore specific generated file types in the root directory
+# (This is more precise than a blanket **/*.json)
+*.csv
+*.log
+*.parquet
+
+
+# =============================================================================
+# Archives & Temporary Files
+# =============================================================================
+*.zip
+*.tmp
+*.bak
+/tmp/
+
+# Ignore specific temporary directories from user's workspace
+df0f26dc4706d96f7495674b69413aea/
+e56232ed0690a30f3b0df2806940713e/
+
+
+# =============================================================================
+# Documentation & Specific Files
+# =============================================================================
+# Ignore specific large or generated documents
+colab.pdf
+
+
+# =============================================================================
+# Dependencies
+# =============================================================================
+# Per project convention, Cargo.lock is not committed
+Cargo.lock
+# Ignore downloaded C++ dependencies
+third_party/eigen-*/
+
+
+# =============================================================================
+# IDE / Editor / OS Files
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

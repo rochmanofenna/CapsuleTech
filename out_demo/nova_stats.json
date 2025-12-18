@@ -1,0 +1,49 @@
+{
+  "chunk_len": 14,
+  "compressed": {
+    "proof_bytes": 10752,
+    "prove": 9502.387858,
+    "setup": 4024.5050420000002,
+    "verify": 461.55903
+  },
+  "constraints": {
+    "primary": 12501,
+    "secondary": 10349
+  },
+  "nova_state": {
+    "n": "0x0000000000000000000000000000000000000000000000000000000000000700",
+    "pow": [
+      "0x354af972483a28b83efc7b4f189c24061a2fa8783d3e3bc80d5d14c15bfe5c86",
+      "0x30b779072e74f668d6425c151280a0ce95f982e645683e1c13d37e40aa88b88a"
+    ],
+    "root": "0x242d9e2f3532df13677608217e1f6ae6f9c86d77ef83ba66fed539054137116c",
+    "s": [
+      "0x1fb98a2a53f922a5fbb8b05194be64b078ba91ac1d0c1c2cdd4085942c9867d2",
+      "0x34a03251fc726ed96384a4fbc5e618e5cded701e524a97d817bf8ac3a82328e4"
+    ]
+  },
+  "plain_state": {
+    "n": "0x0000000000000000000000000000000000000000000000000000000000000700",
+    "pow": [
+      "0x354af972483a28b83efc7b4f189c24061a2fa8783d3e3bc80d5d14c15bfe5c86",
+      "0x30b779072e74f668d6425c151280a0ce95f982e645683e1c13d37e40aa88b88a"
+    ],
+    "root": "0x242d9e2f3532df13677608217e1f6ae6f9c86d77ef83ba66fed539054137116c",
+    "s": [
+      "0x1fb98a2a53f922a5fbb8b05194be64b078ba91ac1d0c1c2cdd4085942c9867d2",
+      "0x34a03251fc726ed96384a4fbc5e618e5cded701e524a97d817bf8ac3a82328e4"
+    ]
+  },
+  "pp_cache_hit": false,
+  "recursive_proof_bytes": 1794040,
+  "steps": 128,
+  "timings_ms": {
+    "base": 246.56125,
+    "plain": 51.959022,
+    "pp": 19424.363978999998,
+    "prove_avg": 570.259318828125,
+    "prove_total": 72993.19281,
+    "verify": 593.777228
+  },
+  "trace_id": "geom_demo"
+}

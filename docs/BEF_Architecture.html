@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>BEF Unified Architecture</title>
+<style>
+ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; line-height: 1.5; margin: 2rem; }
+ h1,h2,h3 { margin-top: 1.2em; }
+ code, pre { background: #f6f8fa; padding: 0.2rem 0.4rem; border-radius: 4px; }
+ .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; }
+ ul { margin-top: 0.2rem; }
+ .small { color: #555; }
+</style>
+</head>
+<body>
+<h1>BEF Unified Architecture: State‑Over‑Time + Hash‑Shielded Streaming Accumulator (HSSA)</h1>
+<p>High‑level and low‑level description of the BEF pipeline (BICEP → ENN‑C++ → FusionAlpha) unified with a hash‑authenticated streaming polynomial fingerprint for temporal cryptographic auditing.</p>
+
+<h2>1. High‑Level Architecture</h2>
+<p>The pipeline comprises four layers:</p>
+<ul>
+  <li><strong>State‑Over‑Time Core (BICEP)</strong>: produces temporal traces (states/updates over time).</li>
+  <li><strong>Learning/Encoding (ENN‑C++)</strong>: consumes traces to learn committor/latent summaries (optional).</li>
+  <li><strong>Graph Planner (FusionAlpha)</strong>: builds constraint/time graphs and performs contradiction‑aware propagation (optional).</li>
+  <li><strong>Cryptographic Accumulator (HSSA)</strong>: commits to an epoch’s trace via chunked Merkle transcript and publishes k polynomial fingerprints (O(1) global check).</li>
+</ul>
+<h3>Dataflow (epoch)</h3>
+<p>BICEP emits flattened integer values v[0..L−1] (mod p). We partition into fixed‑size chunks, compute per‑chunk Merkle roots, form a transcript T=(roots,L), derive challenges r₁..rₖ=H(T||j), and compute a sketch vector S⃗=(Σ v[i]·rⱼ^i). The tuple (roots,L,r⃗,S⃗) is the epoch commitment. ENN/FusionAlpha can optionally ingest per‑chunk features (e.g., sketch_vec) for analytics.</p>
+
+<h2>2. Mathematical Definition</h2>
+<p><strong>Field</strong>: prime p (default 2<sup>61</sup>−1). Trace v ∈ ℤ<sup>L</sup>. Polynomial f(X)=Σ<sub>i=0</sub><sup>L−1</sup> (v[i] mod p)·X<sup>i</sup>.</p>
+<p><strong>Chunk commitments</strong>: Merkle root per chunk over SHA256(encode_u256(v[i] mod p)).</p>
+<p><strong>Transcript</strong>: bytes T = Root<sub>0</sub> || … || Root<sub>m−1</sub> || encode_u256(L).</p>
+<p><strong>Challenges</strong>: r<sub>j</sub> = SHA256(T || encode_u32(j)) mod p, 0≤j&lt;k, r<sub>j</sub> ≠ 0.</p>
+<p><strong>Fingerprints</strong>: S<sub>j</sub> = f(r<sub>j</sub>) mod p. Commitment C = (p, L, Roots, r⃗, S⃗) + optional per‑chunk sketch vectors.</p>
+<h3>Security (binding)</h3>
+<p>If an adversary outputs v≠v′ and the same commitment C, then either it found a Merkle collision (negligible under CRH) or f−f′ = δ(X) is a non‑zero polynomial that vanishes at all r<sub>j</sub>. By Schwartz–Zippel,</p>
+<p class="mono small">Pr[δ(r<sub>j</sub>)=0 ∀j] ≤ (deg δ / p)<sup>k</sup> ≤ (min{t,L}/p)<sup>k</sup>,</p>
+<p>where t is the number of differing positions. Thus Adv<sub>forge</sub> ≤ Adv<sub>crh</sub> + (min{t,L}/p)<sup>k</sup>.</p>
+<h3>Verification</h3>
+<ul>
+  <li><em>Full recomputation</em>: compute S<sub>j</sub> = Σ v[i]·r<sub>j</sub><sup>i</sup> and compare (O(L)).</li>
+  <li><em>Partial audit</em>: sample indices, verify Merkle paths, accumulate v[i]·r<sub>j</sub><sup>i</sup>; combine with SZ bound.</li>
+  <li><em>Snapshot equality</em>: compare S⃗ across parties for identical T (O(1)).</li>
+</ul>
+
+<h2>3. Systems Engineering (CUDA, JSON, Epochs)</h2>
+<p><strong>Chunking</strong>: fixed size B (e.g., 100k); last chunk shorter allowed. Transcript deterministically encodes Roots and L; challenges derived from transcript.</p>
+<p><strong>CUDA kernels</strong>:
+  (i) build r<sup>i</sup> via anchors×base tiling in O(L);
+  (ii) per‑chunk dot products;
+  (iii) multi‑challenge by looping over k.
+  Arithmetic: 64‑bit with 128‑bit products and Mersenne fold for 2<sup>61</sup>−1.</p>
+<p><strong>Input JSON (bef_trace_v1)</strong>: schema, trace_id, field_modulus, vector_length, chunk_length, chunks[{chunk_index, offset, values}]</p>
+<p><strong>Output JSON (bef_sketch_v1)</strong>: schema, trace_id, field_modulus, seed, length, challenges[], global_sketch_vec[], chunks[{chunk_index, offset, length, root_hex, sketch_vec[]}], timing_ms{{cuda_rpow, cuda_chunks}}</p>
+
+<h2>4. Parameters and Performance</h2>
+<p>Recommended: p=2<sup>61</sup>−1, k=4 ⇒ error ≤ (L/p)<sup>4</sup>. For L≈10<sup>8</sup>, error≈2<sup>−136</sup>. Do not reuse challenges across epochs; cache r<sup>i</sup> within an epoch for audits.</p>
+<p>Measured (GTX 1650, L=12.5M): r<sup>i</sup>≈44.9ms; accumulation≈33.6ms; CPU≈69.1s ⇒ ~880× first‑audit, ~2056× amortized.</p>
+<p>Measured (A100, L=12.5–20.5M): r<sup>i</sup>≈4–7ms; accumulation≈2–4ms; CPU≈53–92s ⇒ ~6k–35k× speedups.</p>
+
+<h2>5. Threat and Update Model</h2>
+<p><strong>Threat</strong>: binding/forgery under CRH+RO/QROM; adversary cannot produce v≠v′ with same (Roots,L,S⃗) except with bounded probability. <strong>Update</strong>: append chunks; at epoch end freeze T, derive r⃗, compute S⃗; new epoch ⇒ fresh r⃗. r<sup>i</sup> may be reused within an epoch.</p>
+
+<h2>6. Comparison Axes</h2>
+<ul>
+  <li><strong>Merkle tries</strong>: O(log N) index proofs; no O(1) global check. HSSA adds an O(1) fingerprint S⃗ with SZ bound; keeps O(log N) index proofs.</li>
+  <li><strong>Vector commitments</strong>: succinct openings under PK assumptions. HSSA uses only CRH+SZ (no setup, PQ) and provides global checks, not succinct per‑index proofs.</li>
+  <li><strong>Polynomial commitments</strong>: evaluation proofs (KZG/IPA). HSSA publishes evaluations keyed by RO challenges; no setup; equality/audits instead of proofs.</li>
+  <li><strong>Streaming fingerprints</strong>: SZ fingerprints; HSSA authenticates them via a Merkle transcript (binds content/order).</li>
+</ul>
+
+<h2>7. Unification with BEF (BICEP → ENN‑C++ → FusionAlpha → HSSA)</h2>
+<p>BEF produces state‑over‑time traces. HSSA commits each epoch’s flattened trace; ENN can learn encoders/uncertainty on chunk features; FusionAlpha can use per‑chunk fingerprints as node features in contradiction graphs. Auditors can independently verify (Roots,L,S⃗) without ML components.</p>
+
+<h2>8. API Summary</h2>
+<ul>
+  <li><strong>Commit(v)</strong>: outputs (p,L,Roots,r⃗,S⃗) and optional per‑chunk sketch vectors.</li>
+  <li><strong>Open(i)</strong>: returns (v[i], path) proving membership in a chunk.</li>
+  <li><strong>Verify</strong>: check Merkle path(s), optionally recompute contributions or full S<sub>j</sub>.</li>
+  <li><strong>Tools</strong>: <span class="mono">sketch_trace.py</span> converts <span class="mono">bef_trace_v1</span> → <span class="mono">bef_sketch_v1</span> with chosen (p,k).</li>
+</ul>
+
+<p class="small">© BEF pipeline — this HTML can be printed to PDF via the browser (File → Print → Save as PDF).</p>
+</body>
+</html>

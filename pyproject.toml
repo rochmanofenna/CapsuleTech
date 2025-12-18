@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "capsulebench"
+version = "0.1.0"
+description = "CapsuleBench CLI and adapter-driven pipeline for verifiable benchmark capsules"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "CapsuleBench Contributors"}]
+dependencies = [
+    "click>=8.1",
+    "coincurve>=18.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.23",
+    "websocket-client>=1.6"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0"
+]
+
+[project.scripts]
+capsule-bench = "capsule_bench.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bef_zk*", "backends*", "capsule_bench*", "server*"]
+namespaces = true
+
+[tool.setuptools]
+package-dir = {"" = "."}

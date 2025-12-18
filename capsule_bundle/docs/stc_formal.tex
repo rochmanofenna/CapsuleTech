@@ -1,0 +1,49 @@
+% Streaming Trace Commitment (STC) — LaTeX snippet
+% Assumes amsmath, amsthm, amssymb packages are available in the parent doc
+
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+
+\begin{definition}[Streaming Trace Commitment (STC)]
+Let $\lambda$ be a security parameter and $\mathbb{F}$ a finite field of size $p$. A Streaming Trace Commitment (STC) for traces $v\in\mathbb{F}^n$ is a tuple of PPT algorithms
+\\[(\mathsf{Setup},\mathsf{Init},\mathsf{Update},\mathsf{Commit},\mathsf{Open},\mathsf{VerifyOpen},\mathsf{GlobalCheck}).\\]
+\vspace{-0.5ex}
+\begin{itemize}
+  \item $\mathsf{Setup}(1^\lambda)$ outputs public params $\mathsf{pp}$: field $\mathbb{F}$, a collision–resistant hash $\mathsf{H}$, a maximum chunk length $L$, and sketch count $m$.
+  \item $\mathsf{Init}(\mathsf{pp})$ outputs an initial state $\mathsf{st}_0$.
+  \item $\mathsf{Update}(\mathsf{pp},\mathsf{st},\mathsf{chunk})$ deterministically appends a chunk and outputs a new state $\mathsf{st}'$.
+  \item $\mathsf{Commit}(\mathsf{pp},\mathsf{st})$ outputs a commitment $\mathsf{C}$ and public metadata (e.g., length, challenges).
+  \item $\mathsf{Open}(\mathsf{pp},\mathsf{st},i)$ outputs $(\mathsf{val}_i,\pi_i)$ proving $v[i]=\mathsf{val}_i$ under $\mathsf{C}$.
+  \item $\mathsf{VerifyOpen}(\mathsf{pp},\mathsf{C},i,\mathsf{val}_i,\pi_i)$ deterministically accepts iff the opening is valid.
+  \item $\mathsf{GlobalCheck}(\mathsf{pp},\mathsf{C},\mathsf{meta})$ runs a fast probabilistic consistency check over per–chunk metadata.
+\end{itemize}
+\end{definition}
+
+\paragraph{HSSA/BEF Instantiation.}
+Let $v\in\mathbb{F}_p^n$ with $p=2^{61}{-}1$. The state is
+$\mathsf{st}=(n,\mathsf{root},(r_j)_{j< m},(s_j)_{j< m},(\mathsf{pow}_j)_{j<m})$ with $r_j\in\mathbb{F}_p\\setminus\{0\}$ and $s_j=\sum_{i=0}^{n-1} v_i r_j^i$.
+\begin{align*}
+\mathsf{root}' &\leftarrow \mathsf{H}(\mathsf{root}\,\Vert\,n\,\Vert\,\mathsf{chunkRoot}), \\
+\text{for each } j:&\quad s'_j\leftarrow s_j;\; p\leftarrow \mathsf{pow}_j;\; \forall x\in\mathsf{chunk}:\; s'_j\leftarrow s'_j + x\cdot p,\; p\leftarrow p\cdot r_j; \\
+& s_j\leftarrow s'_j,\; \mathsf{pow}_j\leftarrow p,\; n\leftarrow n+|\mathsf{chunk}|.
+\end{align*}
+The commitment is $\mathsf{C}=(n,\mathsf{root},(r_j)_{j<m},(s_j)_{j<m})$.
+
+\begin{theorem}[Sketch Soundness (ROM/Schwartz–Zippel)]
+Let $v\neq v'\in\mathbb{F}_p^n$ and $\Delta(X)=\sum_{i=0}^{n-1}(v_i{-}v'_i)X^i\not\equiv 0$. If $(r_0,\ldots,r_{m-1})\leftarrow \mathbb{F}_p^m$ are sampled independently (modeled via $\mathsf{H}$ in the ROM), then
+\[
+\Pr\big[\forall j< m:\; \sum_i v_i r_j^i = \sum_i v'_i r_j^i\big] 
+\;=\; \Pr\big[ \forall j< m:\; \Delta(r_j)=0\big] 
+\;\le\; \left(\tfrac{n-1}{p}\right)^m.
+\]
+\end{theorem}
+
+\paragraph{Corollary (parameter plug–in).}
+For $p=2^{61}{-}1$, $n_{\max}=2^{32}$, $m{=}4$, the probability that two distinct traces yield identical sketch vectors under the same challenges is at most $((n_{\max}{-}1)/p)^m\approx (2^{-29})^4=2^{-116}$.
+
+\paragraph{Binding Advantage.}
+With a $b$–bit CRH for the root chain and the ROM for challenge derivation,
+\[
+\mathsf{Adv}^{\text{bind}}(\lambda) \;\le\; 2^{-b} \; + \; \left(\tfrac{n_{\max}-1}{p}\right)^m.
+\]
+
