@@ -44,6 +44,7 @@ debug_da*/
 out_demo/
 tmp_check_proof/
 tmp_debug_da/
+capsule_bundle/
 
 # Ignore specific generated file types in the root directory
 # (This is more precise than a blanket **/*.json)
