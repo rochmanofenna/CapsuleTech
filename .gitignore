@@ -91,3 +91,13 @@ third_party/eigen-*/
 *~
 .DS_Store
 Thumbs.db
+
+# Generated artifacts / demo runs
+out_demo/
+debug_da*/
+tmp_check_proof/
+tmp_debug_da/
+capsule_bundle/
+
+# Vendored deps (should not be tracked)
+enn-cpp/third_party/eigen-*/
