@@ -17,6 +17,7 @@ from backends import ADAPTERS
 from bef_zk.adapter import TraceAdapter
 from bef_zk.codec import ENCODING_ID, canonical_encode, compute_capsule_hash
 from bef_zk.spec import StatementV1, compute_statement_hash
+from capsule_bench.events import EventLogger, ProgressSink
 
 try:
     from coincurve import PrivateKey
@@ -60,47 +61,13 @@ def _compute_file_hash(path: Path) -> str:
     return hasher.hexdigest()
 
 
-class EventLogger:
-    def __init__(self, path: Path, trace_id: str) -> None:
-        self.path = path.resolve()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = self.path.open("w", encoding="utf-8")
-        self._seq = 0
-        self.trace_id = trace_id
-        self._last_hash = "0" * 64
-
-    def emit(self, event_type: str, data: dict[str, object] | None = None) -> str:
-        if self._fh is None:
-            raise RuntimeError("event logger is closed")
-        base_event = {
-            "schema": "bef_capsule_stream_v1",
-            "v": 1,
-            "trace_id": self.trace_id,
-            "seq": self._next_seq(),
-            "ts_ms": int(time.time() * 1000),
-            "type": event_type,
-            "data": data or {},
-        }
-        serialized = json.dumps(base_event, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        prev_hash = self._last_hash
-        event_hash = hashlib.sha256(bytes.fromhex(prev_hash) + serialized).hexdigest()
-        payload = dict(base_event)
-        payload["prev_event_hash"] = prev_hash
-        payload["event_hash"] = event_hash
-        line = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        self._fh.write(line + "\n")
-        self._fh.flush()
-        self._last_hash = event_hash
-        return event_hash
-
-    def _next_seq(self) -> int:
-        self._seq += 1
-        return self._seq
-
-    def close(self) -> None:
-        if self._fh is not None:
-            self._fh.close()
-            self._fh = None
+def _portable_entry(path: Path, *, rel_path: str | None = None, base: Path | None = None) -> dict[str, str]:
+    entry: dict[str, str] = {"path": str(path)}
+    if rel_path:
+        entry["rel_path"] = rel_path
+    elif base is not None:
+        entry["rel_path"] = _relpath(path, base)
+    return entry
 
 
 def required_samples(delta: float, epsilon: float) -> int:
@@ -192,8 +159,13 @@ def main() -> None:
     out_dir = args.output_dir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     events_log_path = (args.events_log or (out_dir / "events.jsonl")).expanduser().resolve()
-    event_logger = EventLogger(events_log_path, args.trace_id)
-    adapter.set_progress_callback(lambda payload: event_logger.emit(payload.get("type", "progress"), payload.get("data")))
+    event_logger = EventLogger(
+        events_log_path,
+        run_id=args.trace_id,
+        trace_id=args.trace_id,
+        default_source="pipeline",
+    )
+    adapter.set_progress_callback(ProgressSink(event_logger).callback)
     event_logger.emit(
         "run_started",
         {
@@ -279,12 +251,15 @@ def main() -> None:
         **trace_commitment.row_archive_artifact,
         "mode": "LOCAL_FILE",
         "path": row_archive_rel,
+        "rel_path": row_archive_rel,
         "abs_path": str(row_archive_dir),
         "chunk_roots_path": os.path.join(row_archive_rel, Path(chunk_roots_paths["json"]).name),
         "chunk_roots_abs": str(chunk_roots_paths["json"]),
         "chunk_roots_bin_path": os.path.join(row_archive_rel, Path(chunk_roots_paths["bin"]).name),
         "chunk_roots_bin_abs": str(chunk_roots_paths["bin"]),
     }
+    row_archive_artifact["chunk_roots_rel_path"] = row_archive_artifact["chunk_roots_path"]
+    row_archive_artifact["chunk_roots_bin_rel_path"] = row_archive_artifact["chunk_roots_bin_path"]
     row_archive_artifact["chunk_handles"] = chunk_handles
 
     default_k = required_samples(0.1, 1e-6)
@@ -351,6 +326,7 @@ def main() -> None:
 
     primary_proof_path = proof_json_path if want_json else proof_bin_path
     primary_size = len(proof_json.encode("utf-8")) if want_json else len(proof_bytes)
+    primary_proof_rel = f"proofs/primary/{primary_proof_path.name}"
 
     event_logger.emit(
         "proof_artifact",
@@ -405,14 +381,18 @@ def main() -> None:
     # primary_proof_path/primary_size computed above for event logging
     geom_formats: dict[str, dict[str, object]] = {}
     if want_json:
+        json_rel = f"proofs/primary/{proof_json_path.name}"
         geom_formats["json"] = {
             "path": str(proof_json_path),
+            "rel_path": json_rel,
             "size_bytes": len(proof_json.encode("utf-8")),
             "sha256_payload_hash": manifest_geom_formats["json"]["sha256_payload_hash"],
         }
     if want_bin:
+        bin_rel = f"proofs/primary/{proof_bin_path.name}"
         geom_formats["bin"] = {
             "path": str(proof_bin_path),
+            "rel_path": bin_rel,
             "size_bytes": len(proof_bytes),
             "sha256_payload_hash": manifest_geom_formats["bin"]["sha256_payload_hash"],
         }
@@ -423,6 +403,17 @@ def main() -> None:
     }
 
     extra_proofs = proof_artifacts.extra or {}
+
+    capsule_artifacts: dict[str, object] = {
+        "trace": _portable_entry(trace_path, rel_path=f"artifacts/{trace_path.name}"),
+        "proof": _portable_entry(primary_proof_path, rel_path=primary_proof_rel),
+        "row_archive": row_archive_artifact,
+    }
+    if events_log_path:
+        capsule_artifacts["events_log"] = _portable_entry(
+            events_log_path,
+            rel_path=f"events/{events_log_path.name}",
+        )
 
     capsule = {
         "schema": "bef_capsule_v1",
@@ -449,6 +440,7 @@ def main() -> None:
         "proofs": {
             "primary": {
                 "path": str(primary_proof_path),
+                "rel_path": primary_proof_rel,
                 "size_bytes": primary_size,
                 "row_openings": len(proof_artifacts.proof_obj.row_openings),
                 "row_backend": row_commitment.backend,
@@ -457,14 +449,8 @@ def main() -> None:
             }
         },
         "row_archive": row_archive_artifact,
-        "artifacts": {
-            "trace": str(trace_path),
-            "proof": str(primary_proof_path),
-            "row_archive": row_archive_artifact,
-        },
+        "artifacts": capsule_artifacts,
     }
-    if events_log_path:
-        capsule["artifacts"]["events_log"] = str(events_log_path)
     if extra_proofs.get("nova"):
         nova_info = {
             "stats_path": extra_proofs["nova"].get("stats_path"),
@@ -476,7 +462,10 @@ def main() -> None:
         if stats_path:
             path_obj = Path(stats_path)
             register_path(path_obj, "json_hex_v1")
-            capsule["artifacts"]["nova_stats"] = str(path_obj)
+            capsule["artifacts"]["nova_stats"] = _portable_entry(
+                path_obj,
+                rel_path=f"proofs/nova/{path_obj.name}",
+            )
 
     capsule["statement"] = statement_obj.to_obj()
     capsule["statement_hash"] = statement_hash_hex
@@ -515,7 +504,10 @@ def main() -> None:
         "default_format": "json" if want_json else "bin",
         "formats": capsule_manifest_formats,
     }
-    capsule.setdefault("artifacts", {})["manifest"] = str(manifest_path)
+    capsule.setdefault("artifacts", {})["manifest"] = _portable_entry(
+        manifest_path,
+        rel_path="manifests/artifact_manifest.json",
+    )
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
     stats_path = args.stats_out or (out_dir / "pipeline_stats.json")

@@ -47,14 +47,56 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # ---------------------------------------------------------------------------
 
 
-def _resolve(base: Path, entry: str) -> Path:
-    path = Path(entry)
+def _resolve(base: Path, entry: Path | str | dict | None) -> Path:
+    if entry is None:
+        raise FileNotFoundError("missing path entry")
+    candidates: list[str | Path] = []
+    if isinstance(entry, dict):
+        candidates.extend(
+            value
+            for key in ("path", "abs_path", "rel_path")
+            if (value := entry.get(key)) is not None
+        )
+    else:
+        candidates.append(entry)
+    for raw in candidates:
+        if raw is None:
+            continue
+        path = Path(raw)
+        if path.is_absolute():
+            return path
+        candidate = base / path
+        if candidate.exists():
+            return candidate.resolve()
+        repo_candidate = (REPO_ROOT / path)
+        if repo_candidate.exists():
+            return repo_candidate.resolve()
+    # Fall back to the first candidate even if it doesn't exist locally yet
+    raw = candidates[0]
+    path = Path(raw)
     if path.is_absolute():
         return path
-    candidate = base / path
-    if candidate.exists():
-        return candidate.resolve()
-    return (REPO_ROOT / path).resolve()
+    return (base / path).resolve()
+
+
+def _entry_str(entry: Path | str | dict | None) -> str | None:
+    if isinstance(entry, dict):
+        return entry.get("path") or entry.get("rel_path") or entry.get("abs_path")
+    if entry is None:
+        return None
+    return str(entry)
+
+
+def _entry_candidates(entry: Path | str | dict | None) -> list[str]:
+    candidates: list[str] = []
+    if isinstance(entry, dict):
+        for key in ("path", "rel_path", "abs_path"):
+            value = entry.get(key)
+            if value:
+                candidates.append(str(value))
+    elif entry is not None:
+        candidates.append(str(entry))
+    return candidates
 
 
 def _load_capsule(path: Path, encoding_id: str | None = None) -> tuple[dict | None, str]:
@@ -545,8 +587,10 @@ def _verify_capsule_core(
         return E050_PROOF_MISSING, None
     proof_path = _resolve(base, proof_path_entry)
     expected_hash = None
+    entry_tokens = _entry_candidates(proof_path_entry)
     for _fmt, meta in (geom_entry.get("formats") or {}).items():
-        if meta.get("path") == str(proof_path_entry):
+        meta_tokens = _entry_candidates(meta)
+        if any(token for token in entry_tokens if token in meta_tokens):
             expected_hash = meta.get("sha256_payload_hash")
             break
     if expected_hash:
@@ -589,7 +633,7 @@ def _verify_capsule_core(
     if event_chain_head:
         if not events_entry:
             return E201_EVENT_LOG_MISMATCH, None
-        events_path = _resolve(base, str(events_entry))
+        events_path = _resolve(base, events_entry)
         if not events_path.exists() or not _verify_event_log_chain(events_path, event_chain_head):
             return E201_EVENT_LOG_MISMATCH, None
     else:
@@ -597,7 +641,7 @@ def _verify_capsule_core(
         if events_hash_expected:
             if not events_entry:
                 return E201_EVENT_LOG_MISMATCH, None
-            events_path = _resolve(base, str(events_entry))
+            events_path = _resolve(base, events_entry)
             if not events_path.exists():
                 return E201_EVENT_LOG_MISMATCH, None
             actual_events_hash = f"sha256:{_compute_file_hash(events_path)}"
@@ -646,7 +690,7 @@ def _verify_capsule_core(
     # Optional Nova state check
     nova_stats_entry = artifacts.get("nova_stats")
     if nova_stats_entry:
-        nova_stats_path = _resolve(base, str(nova_stats_entry))
+        nova_stats_path = _resolve(base, nova_stats_entry)
         try:
             nova_stats = json.loads(nova_stats_path.read_text())
         except (FileNotFoundError, json.JSONDecodeError):

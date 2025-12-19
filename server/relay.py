@@ -64,3 +64,16 @@ async def get_events(run_id: str, since_seq: int | None = None) -> JSONResponse:
     history = store.history(run_id, since_seq)
     payload = [json.loads(line) for line in history]
     return JSONResponse({"run_id": run_id, "events": payload})
+
+
+@app.get("/runs/{run_id}/snapshot")
+async def get_snapshot(run_id: str) -> JSONResponse:
+    history = store.history(run_id)
+    latest = json.loads(history[-1]) if history else None
+    response = {
+        "run_id": run_id,
+        "latest_seq": latest.get("seq") if latest else 0,
+        "latest_event": latest,
+    }
+    status = 200 if latest else 404
+    return JSONResponse(response, status_code=status)

@@ -33,6 +33,12 @@ def _resolve_path(raw: str | None, base: Path) -> Path | None:
     return path.resolve()
 
 
+def _relative_target(entry: Any, default: str | None = None) -> str | None:
+    if isinstance(entry, dict):
+        return entry.get("rel_path") or default
+    return default
+
+
 def write_pack_meta(pack_dir: Path) -> dict[str, Any]:
     entries = []
     for path in sorted(p for p in pack_dir.rglob("*") if p.is_file()):
@@ -65,10 +71,14 @@ def _copy_manifests(meta: dict[str, Any], pack_dir: Path) -> None:
     shutil.copytree(root, dest)
 
 
-def _copy_events(meta: dict[str, Any], pack_dir: Path) -> None:
+def _copy_events(meta: dict[str, Any], capsule: dict[str, Any], pack_dir: Path) -> None:
     events_path = Path(meta.get("events_path", ""))
     if events_path.exists():
-        shutil.copy2(events_path, pack_dir / "events.jsonl")
+        rel_entry = ((capsule.get("artifacts") or {}).get("events_log"))
+        rel_path = _relative_target(rel_entry, f"events/{events_path.name}")
+        dest = pack_dir / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(events_path, dest)
 
 
 def _copy_row_archive(capsule: dict[str, Any], base: Path, pack_dir: Path) -> None:
@@ -79,9 +89,11 @@ def _copy_row_archive(capsule: dict[str, Any], base: Path, pack_dir: Path) -> No
     src_path = _resolve_path(str(src), base)
     if not src_path or not src_path.exists():  # pragma: no cover - depends on run context
         return
-    dest = pack_dir / "row_archive"
+    rel_dir = _relative_target(info, "row_archive")
+    dest = pack_dir / rel_dir
     if dest.exists():
         shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src_path, dest)
 
 
@@ -95,7 +107,13 @@ def _copy_proofs(capsule: dict[str, Any], base: Path, pack_dir: Path) -> None:
             src = _resolve_path(fmt.get("path"), base)
             if not src or not src.exists():
                 continue
-            shutil.copy2(src, target_dir / src.name)
+            rel_path = _relative_target(fmt)
+            if rel_path:
+                dest_path = pack_dir / rel_path
+            else:
+                dest_path = target_dir / src.name
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest_path)
 
 
 def _copy_capsule(capsule_path: Path, pack_dir: Path) -> dict[str, Any]:
@@ -117,7 +135,7 @@ def create_capsulepack(run_meta_path: Path, *, pack_name: str | None = None) -> 
     capsule = _copy_capsule(capsule_path, pack_dir)
     _copy_policy(run_meta, pack_dir)
     _copy_manifests(run_meta, pack_dir)
-    _copy_events(run_meta, pack_dir)
+    _copy_events(run_meta, capsule, pack_dir)
     _copy_row_archive(capsule, pipeline_dir, pack_dir)
     _copy_proofs(capsule, pipeline_dir, pack_dir)
     write_pack_meta(pack_dir)
