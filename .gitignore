@@ -39,6 +39,12 @@ CMakeFiles/
 # Ignore the main output directory for all pipelines and benchmarks
 out/
 
+# Local debug / scratch runs committed in older snapshots
+debug_da*/
+out_demo/
+tmp_check_proof/
+tmp_debug_da/
+
 # Ignore specific generated file types in the root directory
 # (This is more precise than a blanket **/*.json)
 *.csv
