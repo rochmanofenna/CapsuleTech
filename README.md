@@ -38,6 +38,12 @@ PYTHONPATH=. .venv/bin/python scripts/run_pipeline.py --backend geom \
     --policy policies/policy1.txt --policy-id rollup_policy --policy-version v1
 ```
 
+> Demo tip: if you're presenting on a GPU-equipped laptop, use the demo policy
+> bundle (`policies/demo_policy_v1.json`, `policies/demo_acl.json`, and
+> `demo_assets/demo_private_key.hex`). It allows GPUs, relaxes deterministic
+> build requirements, and gives you a deterministic signer so ACL enforcement
+> succeeds during verification.
+
 Outputs:
 
 - `out/.../geom_proof.{json,bin}` – STARK proof (includes row commitment metadata)
@@ -50,7 +56,8 @@ Outputs:
 ```
 PYTHONPATH=. .venv/bin/python scripts/verify_capsule.py out/geom_demo/strategy_capsule.json \
     --policy policies/benchmark_policy_v1.json \
-    --manifest-root out/capsule_runs/<run_id>/manifests
+    --manifest-root out/capsule_runs/<run_id>/manifests \
+    --acl-path policies/demo_acl.json
 ```
 
 - Checks capsule hash, trace spec hash, statement hash, policy registry, proof payload hashes, row commitment, authorship/ACL, Nova state (if present), and DA audit (policy-aware retries/timeouts).
@@ -93,6 +100,45 @@ PYTHONPATH=. .venv/bin/python scripts/capsule_bench.py pack --run-dir out/capsul
 
 `run` captures manifests and executes `scripts/run_pipeline.py`; `pack` enforces the canonical
 capsulepack layout and writes `<run_id>.capsulepack.tgz`.
+
+For a fast signed demo run on a GPU-enabled laptop:
+
+```
+capsule-bench run \
+    --backend geom \
+    --policy policies/demo_policy_v1.json \
+    --policy-id demo_policy_v1 \
+    --policy-version 1.0 \
+    --track-id demo_geom_fast \
+    --private-key demo_assets/demo_private_key.hex
+```
+
+Then verify with policy + ACL enforcement:
+
+```
+PYTHONPATH=. .venv/bin/python scripts/verify_capsule.py \
+    out/capsule_runs/<run_id>/pipeline/strategy_capsule.json \
+    --policy policies/demo_policy_v1.json \
+    --manifest-root out/capsule_runs/<run_id>/manifests \
+    --acl-path policies/demo_acl.json
+```
+
+> The signing key in `demo_assets/demo_private_key.hex` is public and intended
+> only for local demos. Generate and protect your own keys for anything real.
+
+### Streaming events to the relay
+
+`capsule-bench run` always writes a chained `events.jsonl`. To push those events to
+the FastAPI relay while the prover runs, forward them to the ingest socket:
+
+```
+PYTHONPATH=. .venv/bin/python scripts/relay_forward.py \
+    out/capsule_runs/<run_id>/events.jsonl \
+    ws://localhost:8000/ws/ingest/<run_id>
+```
+
+Subscribers (`ws://.../ws/subscribe/<run_id>`) will now see the same live stream
+that is recorded on disk.
 
 ## Benchmarks
 

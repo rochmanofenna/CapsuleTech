@@ -16,7 +16,7 @@ try:  # Optional dependency for signature checks
 except ImportError:  # pragma: no cover - coincurve may be missing in CI
     PublicKey = None
 
-from bef_zk.air.geom_air import GeomAIRParams, GeomInitialState
+from bef_zk.air.geom_air import GeomInitialState
 from bef_zk.codec import (
     ENCODING_ID,
     canonical_decode,
@@ -618,16 +618,19 @@ def _verify_capsule_core(
     if policy_status != OK:
         return policy_status, None
     policy_track = track_id
+    if policy_doc is not None:
+        policy_verified = True
 
-    params = capsule["params"]
-    geom_params = GeomAIRParams(
-        steps=params["steps"],
-        num_challenges=params["num_challenges"],
-        r_challenges=params["r_challenges"],
-        matrix=[[2, 1], [1, 1]],
-    )
+    statement_data = getattr(proof, "statement", None)
+    if statement_data is None or getattr(statement_data, "params", None) is None:
+        return E002_PARSE_FAILED, None
+    geom_params = statement_data.params
+    capsule_params = capsule.get("params") or {}
+    row_width = capsule_params.get("row_width")
+    if row_width is None:
+        return E002_PARSE_FAILED, None
     init_state = GeomInitialState()
-    vc = STCVectorCommitment(chunk_len=params["row_width"])
+    vc = STCVectorCommitment(chunk_len=row_width)
     statement_hash_bytes = bytes.fromhex(statement_hash_hex)
     geom_ok, verify_stats = zk_verify_geom(
         GEOM_PROGRAM,
@@ -778,8 +781,8 @@ def _verify_capsule_core(
             return audit_status, None
 
     result = {
-        "steps": params["steps"],
-        "num_challenges": params["num_challenges"],
+        "steps": geom_params.steps,
+        "num_challenges": geom_params.num_challenges,
         "geom_verify_stats": verify_stats,
         "trace_commitment": capsule.get("trace_commitment"),
         "geom_proof_path": str(proof_path),
