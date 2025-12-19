@@ -45,3 +45,7 @@ class EventStore:
             with path.open("r", encoding="utf-8") as fh:
                 lines = [line.rstrip("\n") for line in fh]
             self._buffers[run_id] = lines
+
+    def run_ids(self) -> list[str]:
+        with self._lock:
+            return sorted(self._buffers.keys())

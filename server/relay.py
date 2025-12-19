@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Dict, Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -77,6 +78,52 @@ async def get_snapshot(run_id: str) -> JSONResponse:
     }
     status = 200 if latest else 404
     return JSONResponse(response, status_code=status)
+
+
+def _format_ts(ts_ms: int | None) -> str | None:
+    if ts_ms is None:
+        return None
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+
+
+def _run_metadata(run_id: str) -> dict | None:
+    history = store.history(run_id)
+    if not history:
+        return None
+    created_at_ms: int | None = None
+    backend = policy_id = track_id = trace_id = None
+    for line in history:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if created_at_ms is None:
+            created_at_ms = event.get("ts_ms")
+        if event.get("type") == "run_started":
+            data = event.get("data") or {}
+            backend = data.get("backend") or backend
+            policy_id = data.get("policy_id") or policy_id
+            track_id = data.get("track_id") or track_id
+            trace_id = data.get("trace_id") or trace_id
+    return {
+        "run_id": run_id,
+        "trace_id": trace_id or run_id,
+        "backend": backend or "unknown",
+        "policy_id": policy_id or "unknown",
+        "track_id": track_id or "unknown",
+        "created_at": _format_ts(created_at_ms),
+    }
+
+
+@app.get("/runs")
+async def list_runs() -> JSONResponse:
+    runs = []
+    for run_id in store.run_ids():
+        meta = _run_metadata(run_id)
+        if meta:
+            runs.append(meta)
+    runs.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    return JSONResponse({"runs": runs})
 @app.get("/")
 async def root() -> dict:
     return {"service": "capsule relay", "ok": True}
@@ -85,4 +132,3 @@ async def root() -> dict:
 @app.get("/healthz")
 async def healthz() -> dict:
     return {"ok": True}
-
