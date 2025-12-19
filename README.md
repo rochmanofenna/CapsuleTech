@@ -140,6 +140,14 @@ PYTHONPATH=. .venv/bin/python scripts/relay_forward.py \
 Subscribers (`ws://.../ws/subscribe/<run_id>`) will now see the same live stream
 that is recorded on disk.
 
+## Web UI (prototype)
+
+`ui/` hosts a static dashboard that talks to the Cloudflare Worker API. Serve it
+locally (e.g., `python -m http.server ui`) or deploy it via Cloudflare Pages with
+the project root set to `ui/`. If the UI and Worker live on different hosts,
+add `window.API_BASE = "https://your-worker.workers.dev";` before loading
+`app.js` in `ui/index.html`.
+
 ## Benchmarks
 
 See `bench/` scripts (e.g., `bench/bench_geom_stc.py`, `bench/bench_streaming_backends.py`) for commitment throughput and STC vs KZG back-ends.

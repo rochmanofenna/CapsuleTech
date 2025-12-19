@@ -1,4 +1,4 @@
-name = "capsule-worker"
+name = "capsuletech"
 main = "worker/index.js"
 compatibility_date = "2025-12-19"
 

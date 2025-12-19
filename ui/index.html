@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CapsuleTech Runs</title>
+    <!--
+      Optionally set window.API_BASE before loading app.js if your API lives on a different host:
+      <script>window.API_BASE = "https://your-worker-subdomain.workers.dev";</script>
+    -->
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>CapsuleTech</h1>
+        <p>Live capsule runs, manifests, and verifications.</p>
+      </div>
+      <button id="refreshRuns">Refresh</button>
+    </header>
+
+    <main>
+      <section class="runs">
+        <h2>Runs</h2>
+        <ul id="runList"></ul>
+      </section>
+      <section class="details">
+        <div class="details-header">
+          <h2 id="runTitle">Select a run</h2>
+          <div id="runMeta"></div>
+        </div>
+        <div id="events" class="events"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
