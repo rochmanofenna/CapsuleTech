@@ -1,0 +1,6 @@
+name = "capsule-worker"
+main = "worker/index.js"
+compatibility_date = "2025-12-19"
+
+[vars]
+# Custom environment variables for the worker can be added here.
