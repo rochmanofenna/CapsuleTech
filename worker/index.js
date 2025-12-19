@@ -1,51 +1,3 @@
-const SAMPLE_RUNS = [
-  {
-    run_id: "demo-geom-001",
-    backend: "geom",
-    policy_id: "demo_policy_v1",
-    track_id: "demo_geom_fast",
-    created_at: "2025-12-19T05:55:00.000Z",
-  },
-  {
-    run_id: "demo-risc0-001",
-    backend: "risc0",
-    policy_id: "demo_policy_v1",
-    track_id: "demo_geom_fast",
-    created_at: "2025-12-19T05:45:00.000Z",
-  },
-];
-
-const SAMPLE_EVENTS = {
-  "demo-geom-001": [
-    {
-      seq: 1,
-      ts_ms: Date.now() - 1000 * 60 * 10,
-      type: "run_started",
-      data: { backend: "geom", track_id: "demo_geom_fast" },
-    },
-    {
-      seq: 2,
-      ts_ms: Date.now() - 1000 * 60 * 9,
-      type: "proof_artifact",
-      data: { size_bytes: 123456, path: "out/demo/adapter_proof.json" },
-    },
-    {
-      seq: 3,
-      ts_ms: Date.now() - 1000 * 60 * 8,
-      type: "capsule_sealed",
-      data: { capsule_hash: "cad1d397f70870f022e39fb8e274feb3" },
-    },
-  ],
-  "demo-risc0-001": [
-    {
-      seq: 1,
-      ts_ms: Date.now() - 1000 * 60 * 20,
-      type: "run_started",
-      data: { backend: "risc0", track_id: "demo_geom_fast" },
-    },
-  ],
-};
-
 function withCors(resp) {
   const headers = new Headers(resp.headers);
   headers.set("Access-Control-Allow-Origin", "*");
@@ -67,31 +19,51 @@ function notFound() {
   return withCors(new Response("Not found", { status: 404 }));
 }
 
-async function handleApi(request) {
+async function proxyJson(path, env) {
+  if (!env.RELAY_BASE) {
+    return jsonResponse({
+      error: "Relay base URL missing",
+      hint: "Set RELAY_BASE in wrangler.toml or Worker environment",
+    }, 500);
+  }
+  const target = new URL(path, env.RELAY_BASE);
+  const upstream = await fetch(target.toString(), {
+    headers: { accept: "application/json" },
+  });
+  const text = await upstream.text();
+  let payload;
+  try {
+    payload = JSON.parse(text || "{}");
+  } catch (err) {
+    return jsonResponse({ error: "Relay returned non-JSON payload" }, 502);
+  }
+  return jsonResponse(payload, upstream.status);
+}
+
+async function handleApi(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/api/health") {
     return jsonResponse({ ok: true, worker: "capsuletech" });
   }
   if (url.pathname === "/api/runs") {
-    return jsonResponse({ runs: SAMPLE_RUNS });
+    return proxyJson("/runs", env);
   }
   const match = url.pathname.match(/^\/api\/runs\/(.+?)\/events$/);
   if (match) {
     const runId = decodeURIComponent(match[1]);
-    const events = SAMPLE_EVENTS[runId] || [];
-    return jsonResponse({ run_id: runId, events });
+    return proxyJson(`/runs/${encodeURIComponent(runId)}/events`, env);
   }
   return notFound();
 }
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     if (request.method === "OPTIONS") {
       return withCors(new Response(null, { status: 204 }));
     }
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/")) {
-      return handleApi(request);
+      return handleApi(request, env);
     }
     return withCors(
       new Response(

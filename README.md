@@ -148,6 +148,13 @@ the project root set to `ui/`. If the UI and Worker live on different hosts,
 add `window.API_BASE = "https://your-worker.workers.dev";` before loading
 `app.js` in `ui/index.html`.
 
+### Worker proxy configuration
+
+The worker proxies `/api/runs` and `/api/runs/:id/events` to your FastAPI relay.
+Set `RELAY_BASE` in `wrangler.toml` (or in the Cloudflare dashboard) to the base
+URL of the relay, e.g. `https://relay.capsuletech.com`. Redeploy with
+`npx wrangler deploy` so the UI reflects live data.
+
 ## Benchmarks
 
 See `bench/` scripts (e.g., `bench/bench_geom_stc.py`, `bench/bench_streaming_backends.py`) for commitment throughput and STC vs KZG back-ends.

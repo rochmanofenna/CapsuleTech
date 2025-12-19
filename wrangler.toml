@@ -3,4 +3,5 @@ main = "worker/index.js"
 compatibility_date = "2025-12-19"
 
 [vars]
-# Custom environment variables for the worker can be added here.
+pages_build_output_dir = "./ui"
+RELAY_BASE = "https://capsuletech.onrender.com"
