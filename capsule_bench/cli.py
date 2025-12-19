@@ -49,6 +49,7 @@ def _run_pipeline(
     track_id: str,
     docker_image_digest: str | None,
     events_log: Path | None,
+    private_key: Path | None,
 ) -> None:
     cmd = [
         sys.executable,
@@ -76,6 +77,8 @@ def _run_pipeline(
         cmd.extend(["--docker-image-digest", docker_image_digest])
     if events_log:
         cmd.extend(["--events-log", str(events_log)])
+    if private_key:
+        cmd.extend(["--private-key", str(private_key)])
     cmd.extend(pipeline_args)
     subprocess.run(cmd, check=True)
 
@@ -100,6 +103,11 @@ def cli() -> None:
 @click.option("--output-root", type=click.Path(path_type=Path), default=Path("out/capsule_runs"))
 @click.option("--run-id", type=str, help="Custom run identifier (default: timestamp slug).")
 @click.option("--trace-id", type=str, help="Optional trace id override.")
+@click.option(
+    "--private-key",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to secp256k1 private key used to sign the capsule.",
+)
 @click.argument("pipeline_args", nargs=-1, type=str)
 def run_command(
     backend: str,
@@ -111,6 +119,7 @@ def run_command(
     output_root: Path,
     run_id: str | None,
     trace_id: str | None,
+    private_key: Path | None,
     pipeline_args: Tuple[str, ...],
 ) -> None:
     """Execute the prover pipeline and capture manifests."""
@@ -138,9 +147,10 @@ def run_command(
             anchor_ref=anchor_ref,
             trace_id=trace_id,
             track_id=track_id,
-        docker_image_digest=docker_image_digest,
-        events_log=events_path,
-    )
+            docker_image_digest=docker_image_digest,
+            events_log=events_path,
+            private_key=private_key,
+        )
     except subprocess.CalledProcessError as exc:
         raise click.ClickException(f"pipeline execution failed: {exc}") from exc
 
