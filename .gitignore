@@ -103,5 +103,9 @@ capsule_bundle/
 # Vendored deps (should not be tracked)
 enn-cpp/third_party/eigen-*/
 
+# UI build artifacts
+ui/dist/
+ui/node_modules/
+
 .gemini/
 gha-creds-*.json
