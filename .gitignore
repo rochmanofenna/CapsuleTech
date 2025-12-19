@@ -102,3 +102,6 @@ capsule_bundle/
 
 # Vendored deps (should not be tracked)
 enn-cpp/third_party/eigen-*/
+
+.gemini/
+gha-creds-*.json
