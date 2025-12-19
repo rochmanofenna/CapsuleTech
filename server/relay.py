@@ -77,3 +77,12 @@ async def get_snapshot(run_id: str) -> JSONResponse:
     }
     status = 200 if latest else 404
     return JSONResponse(response, status_code=status)
+@app.get("/")
+async def root() -> dict:
+    return {"service": "capsule relay", "ok": True}
+
+
+@app.get("/healthz")
+async def healthz() -> dict:
+    return {"ok": True}
+
