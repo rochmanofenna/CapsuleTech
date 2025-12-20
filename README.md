@@ -150,12 +150,18 @@ add `window.API_BASE = "https://your-worker.workers.dev";` before loading
 
 ### Worker proxy configuration
 
-The worker proxies `/api/runs` and `/api/runs/:id/events` to your FastAPI relay.
-Set `RELAY_BASE` in `wrangler.toml` (or in the Cloudflare dashboard) to the base
-URL of the relay, e.g. `https://relay.capsuletech.com`. Redeploy with
-`npx wrangler deploy` so the UI reflects live data. The relay itself can point
-at a Postgres database by setting the `DATABASE_URL` environment variable; if it
-is unset, it falls back to local JSONL files under `server_data/events/`.
+The worker proxies `/api/runs`, `/api/runs/:id`, `/api/runs/:id/events`, and
+`/api/runs/:id/artifacts/*` to your FastAPI relay. Set `RELAY_BASE` in
+`wrangler.toml` (or in the Cloudflare dashboard) to the base URL of the relay,
+e.g. `https://relay.capsuletech.com`. Redeploy with `npx wrangler deploy` so
+the UI reflects live data.
+
+The relay itself can point at a Postgres database by setting the
+`DATABASE_URL` environment variable; if it is unset, it falls back to local
+JSONL files under `server_data/events/`. Artifact downloads are served from
+`ARTIFACTS_ROOT` (default: `server_data/artifacts/`). To expose capsule packs,
+proofs, or traces for a given run, place them under
+`ARTIFACTS_ROOT/<run_id>/` before replaying the events.
 
 ## Benchmarks
 

@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
+import mimetypes
 import os
 from datetime import datetime, timezone
-from typing import Dict, Set
+from pathlib import Path
+from typing import Dict, List, Set
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from .event_store import EventStore
 try:
@@ -33,6 +34,8 @@ def _build_store() -> EventStore:
 
 app = FastAPI(title="CapsuleBench Relay")
 store = _build_store()
+ARTIFACTS_ROOT = Path(os.environ.get("ARTIFACTS_ROOT", "server_data/artifacts")).resolve()
+ARTIFACTS_ROOT.mkdir(parents=True, exist_ok=True)
 
 _subscriptions: Dict[str, Set[WebSocket]] = {}
 _sub_lock = asyncio.Lock()
@@ -138,6 +141,41 @@ def _run_metadata(run_id: str) -> dict | None:
     }
 
 
+def _artifact_dir(run_id: str) -> Path:
+    return (ARTIFACTS_ROOT / run_id).resolve()
+
+
+def _list_artifacts(run_id: str) -> List[dict]:
+    root = _artifact_dir(run_id)
+    if not root.exists() or not root.is_dir():
+        return []
+    result: List[dict] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_file():
+            continue
+        stat = child.stat()
+        content_type = mimetypes.guess_type(child.name)[0] or "application/octet-stream"
+        result.append(
+            {
+                "name": child.name,
+                "size_bytes": stat.st_size,
+                "content_type": content_type,
+            }
+        )
+    return result
+
+
+def _artifact_path(run_id: str, artifact_name: str) -> Path:
+    root = _artifact_dir(run_id)
+    safe_name = Path(artifact_name).name
+    path = (root / safe_name).resolve()
+    if not str(path).startswith(str(root)):
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="artifact not found")
+    return path
+
+
 @app.get("/runs")
 async def list_runs() -> JSONResponse:
     runs = []
@@ -169,7 +207,22 @@ async def run_detail(run_id: str) -> dict:
         "run": metadata,
         "events": latest_events,
         "last_seq": last_seq,
+        "artifacts": _list_artifacts(run_id),
     }
+
+
+@app.get("/runs/{run_id}/artifacts")
+async def list_run_artifacts(run_id: str) -> JSONResponse:
+    if not _run_metadata(run_id):
+        raise HTTPException(status_code=404, detail="run not found")
+    return JSONResponse(_list_artifacts(run_id))
+
+
+@app.get("/runs/{run_id}/artifacts/{artifact_name}")
+async def download_artifact(run_id: str, artifact_name: str):
+    path = _artifact_path(run_id, artifact_name)
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)
 @app.get("/")
 async def root() -> dict:
     return {"service": "capsule relay", "ok": True}
