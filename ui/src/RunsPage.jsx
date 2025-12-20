@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-const API = window.API_BASE || import.meta.env.VITE_API_BASE || ''
+const DEFAULT_API = 'https://capsuletech.rochmanofenna.workers.dev'
+const API = window.API_BASE || import.meta.env.VITE_API_BASE || DEFAULT_API
 
 export default function RunsPage() {
   const [runs, setRuns] = useState([])

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 
-const API = window.API_BASE || import.meta.env.VITE_API_BASE || ''
+const DEFAULT_API = 'https://capsuletech.rochmanofenna.workers.dev'
+const API = window.API_BASE || import.meta.env.VITE_API_BASE || DEFAULT_API
 
 function computeMaxSeq(list, current = 0) {
   let m = current
