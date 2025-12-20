@@ -1,0 +1,873 @@
+  Principal Engineering Robustness Audit
+
+  Overall Assessment: The platform is well-architected and implements the core "verifiable 
+  receipt" concept with high fidelity. The primary areas for hardening are not in the core 
+  cryptographic binding, which is sound, but in the operational realities of the surrounding 
+  web and data infrastructure.
+
+  I will analyze the system layer by layer.
+
+  1. `capsule-bench` CLI & Proving Pipeline
+
+   * Strength: The cryptographic binding of the event_chain_head anchor into the statement_hash 
+     is the strongest part of our system. It correctly makes the proof inseparable from the log 
+     of its own generation.
+   * Potential Weakness (Minor): Manifest Integrity.
+       * Scenario: A sophisticated user could try to manipulate the environment after the 
+         manifests are generated but before the prover runs (e.g., enabling a forbidden GPU 
+         driver).
+       * Analysis: This is a difficult attack to mitigate completely without a fully trusted 
+         execution environment. However, our current approach of generating manifests 
+         immediately before the run is a strong deterrent.
+       * Recommendation: For our "Certified" track, the policy should require that the 
+         capsule-bench run command be executed within a specified, locked-down Docker container 
+         whose hash is also an anchor. This makes the execution environment itself part of the 
+         verifiable artifact.
+   * Potential Weakness (Minor): Resource Exhaustion.
+       * Scenario: A very large trace or proof generation process could exhaust disk space while 
+         writing the events.jsonl or row_archive.
+       * Analysis: The CLI currently does not have explicit checks for available disk space.
+       * Recommendation: Add a pre-flight check in capsule-bench run to ensure sufficient disk 
+         space is available for the estimated artifact sizes. Fail early with a clear error 
+         message.
+
+  2. Relay & API Server (FastAPI)
+
+   * Strength: The use of a thread pool for database writes (store.append) prevents the async 
+     event loop from blocking, which is crucial for keeping the ingest socket responsive. The 
+     fallback from Postgres to a local file store is also robust.
+   * Potential Weakness (Moderate): Unauthenticated Ingest.
+       * Scenario: The README.md mentions forwarding events to 
+         ws://localhost:8000/ws/ingest/<run_id>. In a deployed environment, this endpoint could 
+         be exposed. Without authentication, anyone could push fraudulent events into a 
+         legitimate run's stream, polluting the live view.
+       * Analysis: While the final capsulepack verification would ultimately reject this (due to 
+         the event_chain_head mismatch), it allows for a "denial of service" attack on the user 
+         experience by flooding the UI with garbage.
+       * Recommendation: The ingest socket (/ws/ingest/{run_id}) must be authenticated. The 
+         server should generate a short-lived, single-use token when a run is initiated and 
+         provide it to the user. The capsule-bench CLI must then present this token when it 
+         connects to the WebSocket.
+   * Potential Weakness (High): Polling Storm / Denial of Wallet.
+       * Scenario: A malicious actor (or a buggy UI) could bombard the 
+         /api/runs/:id/events?after_seq=... endpoint with rapid-fire requests, causing high load 
+         on the relay and the Postgres database.
+       * Analysis: This is a classic web application vulnerability.
+       * Recommendation: Implement rate limiting on the API gateway (Cloudflare Worker) and on 
+         the FastAPI server itself. A simple in-memory rate limiter based on IP address or API 
+         key would be sufficient for now.
+
+  3. Worker & Artifact Delivery
+
+   * Strength: Proxying requests through the worker provides a clean, unified API for the UI and 
+     hides the backend infrastructure. The use of Content-Disposition headers is a good security 
+     practice.
+   * Potential Weakness (Moderate): Artifact Storage on Ephemeral Filesystem.
+       * Scenario: The current default stores artifacts on the Render service's local 
+         filesystem. If the Render instance restarts or is redeployed, these artifacts are lost 
+         forever, even if the event data in Postgres survives. This breaks the "verify it 
+         yourself" promise.
+       * Analysis: This is the most significant architectural risk to data durability.
+       * Recommendation: Prioritize the implementation of Phase 2: Durability. The capsule-bench 
+         pack command should upload the final capsulepack.tgz directly to a durable object store 
+         (Cloudflare R2 is the obvious choice given our stack). The relay API should then serve 
+         artifact URLs that point directly to the R2 objects, removing itself as a bottleneck.
+
+  4. UI (React)
+
+   * Strength: The polling logic is simple and effective for a v1. The separation of concerns 
+     into different page components is clean.
+   * Potential Weakness (Minor): UI State Desynchronization.
+       * Scenario: If a user's network connection flaps, the polling timer could stop, or 
+         requests could fail silently, leaving the user looking at a stale view without 
+         realizing it.
+       * Analysis: The current status state (loading, live, error) is a good start but could be 
+         more descriptive.
+       * Recommendation:
+           1. Enhance the status indicator to show a "Connection Lost - Retrying..." state if 
+              polling requests fail consecutively.
+           2. Implement an "exponential backoff" strategy for the polling interval upon failure.
+           3. Display the timestamp of the last received event prominently on the page, so the 
+              user can immediately see how "live" the data actually is.
+
+  Summary of Recommendations (In Priority Order)
+
+   1. Secure the Ingest Endpoint (High Priority): Implement token-based authentication for the 
+      /ws/ingest WebSocket immediately. This is a critical security vulnerability for the live 
+      view.
+   2. Implement Durable Artifact Storage (High Priority): Begin the work to move artifact storage 
+      from the local filesystem to Cloudflare R2. Data durability is paramount.
+   3. Implement Rate Limiting (Moderate Priority): Protect the API from abuse by adding rate 
+      limiters at the worker and/or relay level.
+   4. Enhance UI Robustness (Moderate Priority): Improve the UI's connection status handling to 
+      give users clear feedback on data freshness and connectivity issues.
+   5. Add Pre-flight Checks to CLI (Low Priority): Add checks for disk space and other 
+      environmental prerequisites to the capsule-bench tool to improve user experience.
+   6. Formalize Containerized Execution (Low Priority): For the "Certified" track, update the 
+      policy schema and verifier to require and enforce a specific Docker container anchor.
+
+  This end-to-end analysis shows that while our core cryptographic protocol is sound, we must now 
+  invest in the operational robustness and security of the surrounding web infrastructure to 
+  deliver a truly production-ready platform.
+
+╭─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  > can you compare what we have here so far and the desired vision for the pitch we want to    │
+│    make: This is *very* close to the “one picture” you want. The core is strong:               │
+│    **policy-bound compute receipts with checkpoint lineage**. That’s the converged object.     │
+│                                                                                                │
+│    A couple tweaks will make it land harder with both investors and zkVM/rollup engineers —    │
+│    and avoid two easy attacks.                                                                 │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## What’s already right (don’t change the spine)                                            │
+│                                                                                                │
+│    * **Capsule = notarized invoice** for compute. That’s sticky.                               │
+│    * **Git + receipts** is a great mental model: hash-chained history + acceptance gate.       │
+│    * **Policy-bound** is the “teeth” that makes it more than “committed logs.”                 │
+│    * **Reason codes** are key. Engineers love it, investors get “programmable trust.”          │
+│                                                                                                │
+│    Keep those.                                                                                 │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## The two assumptions people will challenge (and how to preempt them)                      │
+│                                                                                                │
+│    ### 1) “This is just logging + hashing”                                                     │
+│                                                                                                │
+│    A skeptic will say: “So it’s Merkle logs. Cool. Why do I need you?”                         │
+│                                                                                                │
+│    **Your preemptive answer:**                                                                 │
+│    You’re not selling hashing. You’re selling a **standardized contract**:                     │
+│                                                                                                │
+│    * a stable **TraceSpec** (“what does an event mean?”),                                      │
+│    * a stable **PolicySpec** (“what checks are required to accept?”),                          │
+│    * and a verifier that outputs **machine-usable accept/reject codes**.                       │
+│                                                                                                │
+│    The product is the **acceptance standard**, not the storage.                                │
+│                                                                                                │
+│    ### 2) “Policy compliance is squishy”                                                       │
+│                                                                                                │
+│    They’ll try: “How can you prove ‘no lookahead’ or ‘no network’?”                            │
+│                                                                                                │
+│    **Your preemptive answer:**                                                                 │
+│    Policy is *explicitly scoped* to what is checkable. You never claim magical semantic truth. │
+│     You claim:                                                                                 │
+│                                                                                                │
+│    * *trace-bound evidence* + *auditable sampling* + *environment constraints* (where          │
+│    possible),                                                                                  │
+│    * and **tiered receipts** when constraints aren’t enforceable.                              │
+│                                                                                                │
+│    This is your “honesty boundary” section — keep it prominent.                                │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## The one edit I’d make to the “picture”                                                   │
+│                                                                                                │
+│    Right now you sometimes say “with what evidence (commitments + audit proofs + reason        │
+│    codes).”                                                                                    │
+│                                                                                                │
+│    I’d tighten the evidence into 3 buckets, because it reads like engineering truth:           │
+│                                                                                                │
+│    ### Evidence = (Binding, Availability, Enforcement)                                         │
+│                                                                                                │
+│    * **Binding:** statement hash ties code/data/env → committed trace roots → outputs          │
+│    * **Availability:** sampled openings / DA receipts show the committed log is actually       │
+│    retrievable                                                                                 │
+│    * **Enforcement:** policy checks + reason codes show which invariants were verified         │
+│                                                                                                │
+│    That framing makes it feel like a security product, not a logging product.                  │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## Make the “Git + receipts” analogy sharper                                                │
+│                                                                                                │
+│    Git is integrity of *content*. Receipts are integrity of *claims*.                          │
+│                                                                                                │
+│    Your one-liner:                                                                             │
+│                                                                                                │
+│    > “Git proves *what the content is*. Capsules prove *what happened* — under which policy.”  │
+│                                                                                                │
+│    That’s the difference.                                                                      │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## The minimal version you should pitch (investor + team compatible)                        │
+│                                                                                                │
+│    If you want *one* “object slide”, make it this:                                             │
+│                                                                                                │
+│    **Capsule = Policy-Bound Compute Receipt**                                                  │
+│    A capsule checkpoints a long-running job and binds:                                         │
+│                                                                                                │
+│    * **What ran:** code + build + env                                                          │
+│    * **What it touched:** inputs (hash refs)                                                   │
+│    * **What it produced:** outputs (hashes)                                                    │
+│    * **Under what rules:** policy id/hash/version                                              │
+│    * **Over what interval:** epoch range + parent link                                         │
+│    * **With what evidence:** commitments + sampled openings + verifier reason codes            │
+│    * **Optionally:** public timestamp anchor                                                   │
+│                                                                                                │
+│    **So third parties can gate decisions without rerun or data exposure.**                     │
+│                                                                                                │
+│    That’s the slide.                                                                           │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## What to emphasize depending on audience                                                  │
+│                                                                                                │
+│    ### For zkVM / rollup teams                                                                 │
+│                                                                                                │
+│    Lead with: **benchmark credibility + regression discipline**                                │
+│                                                                                                │
+│    * “Verified performance claims”                                                             │
+│    * “Standardized submission tracks”                                                          │
+│    * “Reproducible proof artifacts”                                                            │
+│    * “Tamper fails with reason codes”                                                          │
+│    * “Fits into CI”                                                                            │
+│                                                                                                │
+│    They don’t care about marketplace yet.                                                      │
+│                                                                                                │
+│    ### For investors                                                                           │
+│                                                                                                │
+│    Lead with: **standard + network effects**                                                   │
+│                                                                                                │
+│    * “We become the submission format teams depend on”                                         │
+│    * “Verified leaderboards + partner due diligence”                                           │
+│    * “Once formats are adopted, everything becomes composable: audits, gating, marketplaces”   │
+│                                                                                                │
+│    Investors care about: “why you, why now, why it expands.”                                   │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## One warning: don’t over-rotate on anchoring                                              │
+│                                                                                                │
+│    Anchoring is nice, but if you pitch it too early, people will get distracted and ask:       │
+│                                                                                                │
+│    * “Which chain? why? cost? finality? reorgs?”                                               │
+│                                                                                                │
+│    Treat anchoring as:                                                                         │
+│                                                                                                │
+│    > “Optional notarization for freshness / anti-backdating.”                                  │
+│                                                                                                │
+│    Keep it as an add-on.                                                                       │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## The clean pitch line (yours is good; here’s a slightly tighter version)                  │
+│                                                                                                │
+│    > “CapsuleTech turns long-running compute into policy-bound receipts. Each checkpoint       │
+│    cryptographically binds code, inputs, and outputs under a specified policy, with auditable  │
+│    openings and machine-readable pass/fail reason codes—optionally timestamp-anchored—so       │
+│    others can gate payment, deployment, or leaderboard submission without rerunning or         │
+│    exposing private data.”                                                                     │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## What you should build next so this pitch is *true in product*                            │
+│                                                                                                │
+│    To make this “one picture” real on your live site:                                          │
+│                                                                                                │
+│    1. **Run detail shows the object** (not raw JSON):                                          │
+│                                                                                                │
+│       * policy hash                                                                            │
+│       * trace spec hash                                                                        │
+│       * statement hash                                                                         │
+│       * outputs hash list                                                                      │
+│    2. **Verify button → pass/fail + reason code**                                              │
+│    3. **Download capsule** (the invoice)                                                       │
+│                                                                                                │
+│    If you ship those three, your pitch becomes effortless because the UI *is the slide*.       │
+│                                                                                                │
+│    If you want, I’ll turn what you wrote into a single “investor slide” and a single “engineer │
+│     slide” version (same object, different emphasis), plus the exact UI labels so the website  │
+│    matches the language.                                                                       │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+✦ Excellent. This is the strategic refinement we needed. It doesn't change the engineering 
+  roadmap, but it provides a much sharper, more defensible narrative for why we are building it. 
+  It moves our story from "here's a cool tool" to "we are creating the inevitable standard for 
+  verifiable compute."
+
+  I will now perform the requested comparison, acting as the principal engineer and chief 
+  scientist, to analyze the gap between our current implementation and this powerful, refined 
+  vision.
+
+  ---
+
+  Principal Engineering Analysis: Current State vs. Strategic Vision
+
+  Overall Assessment: Our current implementation is remarkably close to the technical 
+  requirements of the refined vision. We have built the "spine" correctly. The core object 
+  model (Capsule, StatementV1, TraceSpecV1) and the verifier-gated architecture are sound. The 
+  remaining work is not a deep technical refactor but a "last mile" effort in productization, 
+  user experience, and narrative alignment.
+
+  We have built a powerful engine; now we must build the dashboard and write the owner's 
+  manual.
+
+  Here is the detailed comparison:
+
+  1. The Core Object: "Policy-Bound Compute Receipt"
+
+   * Vision: A capsule that binds: What ran, What it touched, What it produced, Under what 
+     rules, Over what interval, With what evidence, and optionally, a timestamp anchor.
+   * Current State: 90% Implemented.
+       * What ran (code + build + env): Implemented. Our manifests (hardware, OS, toolchain) and 
+         docker_image_digest anchor capture this perfectly.
+       * What it touched (inputs): Implemented. The workload_input_hash anchor binds the proof 
+         to the specific dataset hash.
+       * What it produced (outputs): Implemented. The public_inputs in the Statement bind the 
+         proof to the final results.
+       * Under what rules (policy): Implemented. The policy_hash is a core part of the 
+         Statement.
+       * With what evidence (commitments, openings, reason codes): Implemented.
+           * Binding: statement_hash in the transcript.
+           * Availability: DA sampling audit in the verifier.
+           * Enforcement: Policy checks in the verifier that produce E1xx reason codes.
+       * Over what interval / Optional timestamp anchor: Not Implemented. This is the only minor 
+         gap. We do not currently have a formal concept of an "epoch" or a mechanism to anchor to
+          an external timestamping service (like a blockchain).
+   * Gap Analysis: The gap is minimal. The core object model is already there. The "interval" 
+     and "timestamp" features are add-ons, not foundational changes. As the feedback correctly 
+     warns, we should not over-rotate on anchoring yet.
+
+  2. The Narrative: Preempting the Skeptics
+
+   * Vision:
+       1. We sell a standardized contract, not just hashing.
+       2. We are honest about the scope of policy enforcement.
+   * Current State: Technically Implemented, Narratively Incomplete.
+       * Standardized Contract: We have a stable TraceSpec and PolicySpec (via JSON schemas). We 
+         have a verifier with machine-usable reason codes. We have not, however, exposed this 
+         clearly in the UI or documentation. A user sees a JSON log, not a "standardized 
+         contract."
+       * Honesty Boundary: Our system does operate on trace-bound evidence and environment 
+         constraints. The verifier only checks what it can observe from the capsulepack. We are 
+         not claiming magical semantic truth. Again, this is an implicit property of the 
+         implementation that needs to be made explicit in our product marketing and UI.
+
+   * Gap Analysis: The gap here is purely in communication and product marketing. The 
+     engineering has been done correctly; we just haven't told the story properly.
+
+  3. The "One Picture" Edit: Evidence = (Binding, Availability, Enforcement)
+
+   * Vision: Frame our evidence in these three strong buckets.
+   * Current State: Fully Implemented.
+       * Binding: statement_hash in the transcript. Check.
+       * Availability: DA sampling logic in verify_capsule.py. Check.
+       * Enforcement: Policy checks against manifests in verify_capsule.py. Check.
+
+   * Gap Analysis: No engineering gap. This is a powerful narrative frame that we must adopt 
+     immediately in our UI, documentation, and investor pitches. For example, the verification 
+     report in the UI should be structured under these three headings.
+
+  4. The "Build Next" Mandate: Making the Pitch True in Product
+
+  This is the most important part of the analysis. It defines the immediate, high-impact work 
+  required to close the gap between our robust backend and our current prototype UI.
+
+   * Vision:
+       1. Run detail page shows the structured object, not raw JSON.
+       2. "Verify" button produces a clear pass/fail + reason code.
+       3. "Download capsule" button provides the verifiable invoice.
+   * Current State: Partially Implemented.
+       * The RunDetailPage.jsx currently renders a raw JSON dump of each event. It does not 
+         present the clean, structured "object view."
+       * There is no "Verify" button or asynchronous verification flow implemented yet.
+       * There are no artifact download buttons implemented yet.
+
+   * Gap Analysis: This is the primary engineering work for Phase 2 of our roadmap. The backend 
+     API (/api/runs/:id) already provides most of the necessary data. The work is concentrated 
+     in the UI and the "Action Path" (verification endpoint and artifact delivery).
+
+  Conclusion & Actionable Next Steps
+
+  The feedback is a gift. It confirms our core engineering is sound and gives us a razor-sharp 
+  narrative to build our product around. We are not a "logging company"; we are a "compute 
+  integrity" company.
+
+  Our immediate engineering priorities are now crystal clear and directly map to making the 
+  pitch true in the product:
+
+   1. Implement the "Action Path" Backend:
+       * Verification Endpoint: Build the asynchronous POST /api/runs/:id/verify endpoint using 
+         a task queue (Celery). The worker will execute verify_capsule.py and update the run's 
+         status in Postgres.
+       * Artifact Endpoint: Build the GET /api/runs/:id/artifacts/:name endpoint, proxied 
+         through the worker. For now, it will serve from the local ARTIFACTS_ROOT. We will plan 
+         the migration to R2 for durability.
+
+   2. Overhaul the `RunDetailPage.jsx` UI:
+       * The "Object View": Redesign the top of the page to display the key fields of the 
+         "Policy-Bound Compute Receipt" clearly: Policy Hash, Statement Hash, Capsule Hash, 
+         Anchors, etc. This becomes the "slide" that the user sees.
+       * The "Evidence View": Structure the verification status section under the three 
+         headings: Binding, Availability, and Enforcement. A successful verification will show 
+         green checks for all three. A failure will show a red 'X' next to the failed category 
+         with the specific reason code (e.g., Enforcement Failed: 
+         E101_POLICY_VIOLATION_GPU_FORBIDDEN).
+       * Action Buttons: Add the "Download Capsulepack" and "Verify" buttons. The "Verify" 
+         button will call the new async endpoint and update the UI to show a "Verifying..." 
+         status.
+
+   3. Update the Narrative:
+       * Immediately update the README.md and website copy to adopt the "Git proves what, 
+         Capsules prove what happened" analogy and the "(Binding, Availability, Enforcement)" 
+         framework.
+
+  This plan is concrete, achievable, and directly addresses the highest-leverage feedback. It 
+  closes the final gap between our powerful backend and a product that can be pitched with 
+  effortless clarity and conviction.
+
+╭─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  > give hard implementation down to the concise details for the conclusional and actionable    │
+│    steps. literal accurate psuedocode and precise and perfect logic. be efficient and be fast  │
+│    and be smart and never stop questioning your thinking before you answer: This is *very*     │
+│    close to the “one picture” you want. The core is strong: **policy-bound compute receipts    │
+│    with checkpoint lineage**. That’s the converged object.                                     │
+│                                                                                                │
+│    A couple tweaks will make it land harder with both investors and zkVM/rollup engineers —    │
+│    and avoid two easy attacks.                                                                 │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## What’s already right (don’t change the spine)                                            │
+│                                                                                                │
+│    * **Capsule = notarized invoice** for compute. That’s sticky.                               │
+│    * **Git + receipts** is a great mental model: hash-chained history + acceptance gate.       │
+│    * **Policy-bound** is the “teeth” that makes it more than “committed logs.”                 │
+│    * **Reason codes** are key. Engineers love it, investors get “programmable trust.”          │
+│                                                                                                │
+│    Keep those.                                                                                 │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## The two assumptions people will challenge (and how to preempt them)                      │
+│                                                                                                │
+│    ### 1) “This is just logging + hashing”                                                     │
+│                                                                                                │
+│    A skeptic will say: “So it’s Merkle logs. Cool. Why do I need you?”                         │
+│                                                                                                │
+│    **Your preemptive answer:**                                                                 │
+│    You’re not selling hashing. You’re selling a **standardized contract**:                     │
+│                                                                                                │
+│    * a stable **TraceSpec** (“what does an event mean?”),                                      │
+│    * a stable **PolicySpec** (“what checks are required to accept?”),                          │
+│    * and a verifier that outputs **machine-usable accept/reject codes**.                       │
+│                                                                                                │
+│    The product is the **acceptance standard**, not the storage.                                │
+│                                                                                                │
+│    ### 2) “Policy compliance is squishy”                                                       │
+│                                                                                                │
+│    They’ll try: “How can you prove ‘no lookahead’ or ‘no network’?”                            │
+│                                                                                                │
+│    **Your preemptive answer:**                                                                 │
+│    Policy is *explicitly scoped* to what is checkable. You never claim magical semantic truth. │
+│     You claim:                                                                                 │
+│                                                                                                │
+│    * *trace-bound evidence* + *auditable sampling* + *environment constraints* (where          │
+│    possible),                                                                                  │
+│    * and **tiered receipts** when constraints aren’t enforceable.                              │
+│                                                                                                │
+│    This is your “honesty boundary” section — keep it prominent.                                │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## The one edit I’d make to the “picture”                                                   │
+│                                                                                                │
+│    Right now you sometimes say “with what evidence (commitments + audit proofs + reason        │
+│    codes).”                                                                                    │
+│                                                                                                │
+│    I’d tighten the evidence into 3 buckets, because it reads like engineering truth:           │
+│                                                                                                │
+│    ### Evidence = (Binding, Availability, Enforcement)                                         │
+│                                                                                                │
+│    * **Binding:** statement hash ties code/data/env → committed trace roots → outputs          │
+│    * **Availability:** sampled openings / DA receipts show the committed log is actually       │
+│    retrievable                                                                                 │
+│    * **Enforcement:** policy checks + reason codes show which invariants were verified         │
+│                                                                                                │
+│    That framing makes it feel like a security product, not a logging product.                  │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## Make the “Git + receipts” analogy sharper                                                │
+│                                                                                                │
+│    Git is integrity of *content*. Receipts are integrity of *claims*.                          │
+│                                                                                                │
+│    Your one-liner:                                                                             │
+│                                                                                                │
+│    > “Git proves *what the content is*. Capsules prove *what happened* — under which policy.”  │
+│                                                                                                │
+│    That’s the difference.                                                                      │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## The minimal version you should pitch (investor + team compatible)                        │
+│                                                                                                │
+│    If you want *one* “object slide”, make it this:                                             │
+│                                                                                                │
+│    **Capsule = Policy-Bound Compute Receipt**                                                  │
+│    A capsule checkpoints a long-running job and binds:                                         │
+│                                                                                                │
+│    * **What ran:** code + build + env                                                          │
+│    * **What it touched:** inputs (hash refs)                                                   │
+│    * **What it produced:** outputs (hashes)                                                    │
+│    * **Under what rules:** policy id/hash/version                                              │
+│    * **Over what interval:** epoch range + parent link                                         │
+│    * **With what evidence:** commitments + sampled openings + verifier reason codes            │
+│    * **Optionally:** public timestamp anchor                                                   │
+│                                                                                                │
+│    **So third parties can gate decisions without rerun or data exposure.**                     │
+│                                                                                                │
+│    That’s the slide.                                                                           │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## What to emphasize depending on audience                                                  │
+│                                                                                                │
+│    ### For zkVM / rollup teams                                                                 │
+│                                                                                                │
+│    Lead with: **benchmark credibility + regression discipline**                                │
+│                                                                                                │
+│    * “Verified performance claims”                                                             │
+│    * “Standardized submission tracks”                                                          │
+│    * “Reproducible proof artifacts”                                                            │
+│    * “Tamper fails with reason codes”                                                          │
+│    * “Fits into CI”                                                                            │
+│                                                                                                │
+│    They don’t care about marketplace yet.                                                      │
+│                                                                                                │
+│    ### For investors                                                                           │
+│                                                                                                │
+│    Lead with: **standard + network effects**                                                   │
+│                                                                                                │
+│    * “We become the submission format teams depend on”                                         │
+│    * “Verified leaderboards + partner due diligence”                                           │
+│    * “Once formats are adopted, everything becomes composable: audits, gating, marketplaces”   │
+│                                                                                                │
+│    Investors care about: “why you, why now, why it expands.”                                   │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## One warning: don’t over-rotate on anchoring                                              │
+│                                                                                                │
+│    Anchoring is nice, but if you pitch it too early, people will get distracted and ask:       │
+│                                                                                                │
+│    * “Which chain? why? cost? finality? reorgs?”                                               │
+│                                                                                                │
+│    Treat anchoring as:                                                                         │
+│                                                                                                │
+│    > “Optional notarization for freshness / anti-backdating.”                                  │
+│                                                                                                │
+│    Keep it as an add-on.                                                                       │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## The clean pitch line (yours is good; here’s a slightly tighter version)                  │
+│                                                                                                │
+│    > “CapsuleTech turns long-running compute into policy-bound receipts. Each checkpoint       │
+│    cryptographically binds code, inputs, and outputs under a specified policy, with auditable  │
+│    openings and machine-readable pass/fail reason codes—optionally timestamp-anchored—so       │
+│    others can gate payment, deployment, or leaderboard submission without rerunning or         │
+│    exposing private data.”                                                                     │
+│                                                                                                │
+│    ---                                                                                         │
+│                                                                                                │
+│    ## What you should build next so this pitch is *true in product*                            │
+│                                                                                                │
+│    To make this “one picture” real on your live site:                                          │
+│                                                                                                │
+│    1. **Run detail shows the object** (not raw JSON):                                          │
+│                                                                                                │
+│       * policy hash                                                                            │
+│       * trace spec hash                                                                        │
+│       * statement hash                                                                         │
+│       * outputs hash list                                                                      │
+│    2. **Verify button → pass/fail + reason code**                                              │
+│    3. **Download capsule** (the invoice)                                                       │
+│                                                                                                │
+│    If you ship those three, your pitch becomes effortless because the UI *is the slide*.       │
+│                                                                                                │
+│    If you want, I’ll turn what you wrote into a single “investor slide” and a single “engineer │
+│     slide” version (same object, different emphasis), plus the exact UI labels so the website  │
+│    matches the language.                                                                       │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+
+✦ Understood. The strategic feedback is clear and correct. My role now is to translate this 
+  refined vision into a concrete, principal-level engineering plan. No ambiguity. No 
+  hand-waving. This is the blueprint for execution.
+
+  ---
+
+  Technical Implementation Plan: The Verifiable Receipt Platform
+
+  Objective: To implement the "Action Path" and UI overhaul necessary to make the product a 
+  direct, tangible representation of our "Policy-Bound Compute Receipt" pitch. This involves 
+  three core initiatives: implementing the asynchronous verification endpoint, building the 
+  artifact delivery system, and redesigning the UI to be the "living slide" of our product.
+
+  1. Initiative: Asynchronous Verification Endpoint
+
+  Objective: To allow users to trigger a full, server-side verification of a capsulepack and 
+  see the results without blocking the UI.
+
+  1.1 Data Model & State Machine (PostgreSQL)
+
+  The runs table in our database needs to be augmented to support the verification lifecycle.
+
+  SQL Schema (`migrations/002_add_verification_fields.sql`):
+
+   1 ALTER TABLE runs
+   2 ADD COLUMN status TEXT NOT NULL DEFAULT 'PENDING',
+   3 ADD COLUMN verification_status TEXT, -- PENDING, VERIFYING, VERIFIED, FAILED
+   4 ADD COLUMN verification_report JSONB,
+   5 ADD COLUMN artifacts_root_url TEXT; -- URL to the durable object store root
+
+   * `status`: The overall run status (RUNNING, COMPLETED, etc.).
+   * `verification_status`: The specific state of the audit. This is what the UI's "Trust 
+     Indicator" will key off.
+   * `verification_report`: A JSONB field to store the structured output from verify_capsule.py.
+
+  1.2 Asynchronous Task Queue (Celery & Redis)
+
+  We will use Celery to manage background verification tasks.
+
+  File: `worker/tasks.py`
+
+    1 from celery import Celery
+    2 import subprocess
+    3 import json
+    4 import os
+    5 from server.event_store_pg import PostgresEventStore # Assumes DB access
+    6 
+    7 app = Celery('tasks', broker=os.environ.get('REDIS_URL'))
+    8 db_store = PostgresEventStore(os.environ.get('DATABASE_URL'))
+    9 
+   10 @app.task
+   11 def verify_run_task(run_id: str):
+   12     db_store.update_verification_status(run_id, 'VERIFYING')
+   13     
+   14     # 1. Download the capsulepack from durable storage (R2)
+   15     pack_path = download_artifact(run_id, 'capsulepack.tgz')
+   16     unpacked_dir = unpack_capsulepack(pack_path)
+   17 
+   18     # 2. Construct the verification command
+   19     capsule_json_path = unpacked_dir / 'capsule.json'
+   20     policy_path = unpacked_dir / 'policy.json'
+   21     manifest_root = unpacked_dir / 'manifests'
+   22     
+   23     cmd = [
+   24         "python", "-m", "scripts.verify_capsule",
+   25         str(capsule_json_path),
+   26         "--policy", str(policy_path),
+   27         "--manifest-root", str(manifest_root)
+   28     ]
+   29     
+   30     # 3. Execute the verifier
+   31     result = subprocess.run(cmd, capture_output=True, text=True)
+   32     
+   33     # 4. Parse result and update database
+   34     if result.returncode == 0:
+   35         report = json.loads(result.stdout)
+   36         db_store.update_verification_status(run_id, 'VERIFIED', report)
+   37         # Emit a final server_verified event to the run's stream
+   38         db_store.emit_server_event(run_id, 'server_verified', {'status': 'VERIFIED'
+      , 'report': report})
+   39     else:
+   40         try:
+   41             report = json.loads(result.stderr)
+   42         except json.JSONDecodeError:
+   43             report = {'error_code': 'E_UNKNOWN', 'detail': result.stderr}
+   44         db_store.update_verification_status(run_id, 'FAILED', report)
+   45         db_store.emit_server_event(run_id, 'server_verified', {'status': 'FAILED', 
+      'report': report})
+   46 
+   47     # 5. Clean up local files
+   48     cleanup(pack_path, unpacked_dir)
+
+  1.3 API Endpoint (FastAPI)
+
+  File: `server/relay.py`
+
+    1 from fastapi import FastAPI, BackgroundTasks
+    2 from worker.tasks import verify_run_task
+    3 
+    4 app = FastAPI(...)
+    5 
+    6 @app.post("/api/runs/{run_id}/verify", status_code=202)
+    7 async def trigger_verification(run_id: str, background_tasks: BackgroundTasks):
+    8     # 1. Check if run exists and is in a verifiable state (e.g., COMPLETED)
+    9     run_state = db_store.get_run_status(run_id)
+   10     if run_state not in ['COMPLETED', 'VERIFIED', 'FAILED']:
+   11         raise HTTPException(status_code=409, detail="Run is not in a final state.")
+   12 
+   13     # 2. Update status and enqueue the background task
+   14     db_store.update_verification_status(run_id, 'PENDING')
+   15     background_tasks.add_task(verify_run_task, run_id)
+   16     
+   17     return {"message": "Verification process initiated."}
+
+  2. Initiative: Durable Artifact Delivery
+
+  Objective: To ensure artifacts are permanent and can be reliably downloaded by users and the 
+  verification worker.
+
+  2.1 Upload Logic (`capsule-bench`)
+
+  The capsule-bench pack command will be upgraded.
+
+  File: `capsule_bench/packing.py`
+
+    1 import boto3 # Using boto3 for R2 compatibility
+    2 
+    3 def pack_and_upload_run(run_dir: Path, run_id: str):
+    4     # ... (existing logic to create capsulepack.tgz) ...
+    5     pack_path = create_capsulepack(run_dir)
+    6 
+    7     # NEW: Upload to R2
+    8     r2_client = boto3.client(
+    9         's3',
+   10         endpoint_url=os.environ['R2_ENDPOINT_URL'],
+   11         aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],
+   12         aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY']
+   13     )
+   14     
+   15     object_key = f"{run_id}/capsulepack.tgz"
+   16     r2_client.upload_file(str(pack_path), os.environ['R2_BUCKET_NAME'], object_key)
+   17     
+   18     # After upload, notify the main API that the run is 'COMPLETED'
+   19     # and its artifacts are available at the R2 location.
+   20     notify_api_of_completion(run_id, f"r2://{os.environ['R2_BUCKET_NAME']}/{run_id}
+      ")
+
+  2.2 API Endpoint (Cloudflare Worker)
+
+  The worker will now generate signed, temporary URLs for downloads. This is more secure than 
+  a simple proxy.
+
+  File: `worker/index.js`
+
+    1 // ... (router setup) ...
+    2 
+    3 router.get('/api/runs/:id/artifacts/:name', async (request, env) => {
+    4   const { id, name } = request.params;
+    5   
+    6   // In a real implementation, you'd check permissions here.
+    7   
+    8   const r2 = env.MY_R2_BUCKET;
+    9   const objectKey = `${id}/${name}`;
+   10   
+   11   // Generate a signed URL valid for 5 minutes.
+   12   const signedUrl = await r2.get(objectKey, {
+   13     presign: {
+   14       expiration: 300, // 5 minutes
+   15     },
+   16   });
+   17 
+   18   // Redirect the user to the temporary R2 URL.
+   19   return new Response(null, {
+   20     status: 302,
+   21     headers: {
+   22       'Location': signedUrl,
+   23     },
+   24   });
+   25 });
+
+  3. Initiative: UI Overhaul - The "Living Slide"
+
+  Objective: To transform the RunDetailPage from a JSON log viewer into a structured, 
+  intuitive display of the "Policy-Bound Compute Receipt."
+
+  File: `ui/src/RunDetailPage.jsx`
+
+    1 import React, { useState, useEffect } from 'react';
+    2 import { useParams } from 'react-router-dom';
+    3 
+    4 // --- Component: The "Object View" ---
+    5 function ReceiptHeader({ metadata }) {
+    6   if (!metadata) return <div className="loading">Loading Receipt...</div>;
+    7   
+    8   return (
+    9     <div className="receipt-header">
+   10       <h1>Policy-Bound Compute Receipt</h1>
+   11       <div className="grid">
+   12         <div><strong>Run ID:</strong> <code>{metadata.run_id}</code></div>
+   13         <div><strong>Status:</strong> <span className={`status-${metadata.status
+      }`}>{metadata.status}</span></div>
+   14         <div><strong>Policy Hash:</strong> <code>{metadata.policy?.policy_hash}</
+      code></div>
+   15         <div><strong>Statement Hash:</strong> <code>
+      {metadata.statement?.statement_hash_hex}</code></div>
+   16         <div><strong>Capsule Hash:</strong> <code>{metadata.capsule_hash_hex || 
+      'Not Sealed'}</code></div>
+   17       </div>
+   18     </div>
+   19   );
+   20 }
+   21 
+   22 // --- Component: The "Evidence View" ---
+   23 function EvidencePanel({ verificationReport }) {
+   24   const renderCheck = (status) => status ? '✅' : '❌';
+   25 
+   26   return (
+   27     <div className="evidence-panel">
+   28       <h2>Evidence</h2>
+   29       <div className="grid">
+   30         <div><strong>Binding:</strong> {renderCheck(verificationReport?.binding_ok
+      )}</div>
+   31         <div><strong>Availability:</strong> {renderCheck(verificationReport?.da_ok
+      )}</div>
+   32         <div><strong>Enforcement:</strong> {renderCheck(verificationReport?.
+      enforcement_ok)}</div>
+   33       </div>
+   34       {verificationReport?.failed_reason && 
+   35         <div className="reason-code">
+   36           <strong>Reason:</strong> <code>{verificationReport.failed_reason}</code>
+   37         </div>
+   38       }
+   39     </div>
+   40   );
+   41 }
+   42 
+   43 // --- Main Page Component ---
+   44 export default function RunDetailPage() {
+   45   const { runId } = useParams();
+   46   const [runData, setRunData] = useState(null);
+   47   // ... (existing polling logic for events) ...
+   48 
+   49   const handleVerify = async () => {
+   50     // Update UI state to 'VERIFYING'
+   51     // POST to /api/runs/:id/verify
+   52   };
+   53 
+   54   return (
+   55     <div>
+   56       <ReceiptHeader metadata={runData?.metadata} />
+   57       
+   58       <div className="actions">
+   59         <a href={runData?.artifacts?.capsulepack} download>Download Capsule</a>
+   60         <button onClick={handleVerify} disabled={runData?.status === 'VERIFYING'}>
+   61           Verify
+   62         </button>
+   63       </div>
+   64 
+   65       {runData?.final_verification && <EvidencePanel verificationReport=
+      {runData.final_verification.report} />}
+   66 
+   67       <div className="live-log">
+   68         <h3>Live Event Stream</h3>
+   69         {/* ... (existing event rendering logic) ... */}
+   70       </div>
+   71     </div>
+   72   );
+   73 }
+
+  This implementation plan is precise, efficient, and directly maps our refined strategic 
+  vision to the codebase. It hardens the platform's security and durability while creating a 
+  user experience that is a direct, compelling embodiment of our pitch. This is how we build a 
+  product that feels inevitable.

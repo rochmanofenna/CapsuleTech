@@ -41,6 +41,12 @@ a {
   min-height: 300px;
 }
 
+.details {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
 .section-header {
   display: flex;
   justify-content: space-between;
@@ -79,6 +85,42 @@ button {
   cursor: pointer;
 }
 
+.status-badge {
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+}
+
+.status-verified {
+  background: rgba(56, 217, 169, 0.15);
+  color: #8fffd5;
+}
+
+.status-failed {
+  background: rgba(255, 99, 132, 0.15);
+  color: #ff9fb3;
+}
+
+.evidence-panel {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  padding: 16px;
+}
+
+.evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.reason-code {
+  margin-top: 12px;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+}
+
 .meta-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -86,24 +128,55 @@ button {
   margin-bottom: 18px;
 }
 
-.artifact-list {
-  margin-bottom: 18px;
+.receipt-panel {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
 }
 
-.artifact-list ul {
-  list-style: none;
-  padding: 0;
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.75rem;
+  color: #8a96b8;
+  margin: 0 0 8px 0;
+}
+
+.actions {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  align-items: flex-start;
 }
 
-.artifact-list a {
-  text-decoration: none;
-  color: #8ecbff;
+.artifact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
 }
 
-.events {
+.artifact-card {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.artifact-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.events-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.event-log {
   max-height: 520px;
   overflow-y: auto;
   display: flex;
@@ -118,6 +191,19 @@ button {
   padding: 12px;
   font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
   font-size: 0.85rem;
+}
+
+.event-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.event-card-meta {
+  font-size: 0.75rem;
+  color: #98a2c3;
+  margin-bottom: 8px;
 }
 
 @media (max-width: 960px) {

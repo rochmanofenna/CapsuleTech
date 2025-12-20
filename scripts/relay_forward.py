@@ -11,12 +11,23 @@ from contextlib import closing
 from websocket import WebSocketConnectionClosedException, create_connection
 
 
-def _forward_events(events_path: Path, ingest_url: str, *, skip_history: bool, poll_interval: float) -> None:
+def _forward_events(
+    events_path: Path,
+    ingest_url: str,
+    *,
+    skip_history: bool,
+    poll_interval: float,
+    token: str | None,
+) -> None:
     events_path = events_path.expanduser().resolve()
     if not events_path.exists():
         raise FileNotFoundError(f"events log missing: {events_path}")
 
-    with events_path.open("r", encoding="utf-8") as fh, closing(create_connection(ingest_url)) as ws:
+    headers = []
+    if token:
+        headers.append(f"X-Ingest-Token: {token}")
+
+    with events_path.open("r", encoding="utf-8") as fh, closing(create_connection(ingest_url, header=headers)) as ws:
         if not skip_history:
             for line in fh:
                 data = line.strip()
@@ -58,8 +69,19 @@ def main() -> None:
         default=0.5,
         help="Sleep interval (seconds) when waiting for new lines",
     )
+    parser.add_argument(
+        "--token",
+        type=str,
+        help="Relay ingest token (provided by capsule-bench run registration)",
+    )
     args = parser.parse_args()
-    _forward_events(args.events_path, args.ingest_url, skip_history=args.skip_history, poll_interval=args.poll_interval)
+    _forward_events(
+        args.events_path,
+        args.ingest_url,
+        skip_history=args.skip_history,
+        poll_interval=args.poll_interval,
+        token=args.token,
+    )
 
 
 if __name__ == "__main__":

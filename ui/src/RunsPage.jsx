@@ -39,7 +39,10 @@ export default function RunsPage() {
               <strong>{run.run_id}</strong>
               <div><small>{run.backend}</small></div>
               <div><small>{run.policy_id}</small></div>
-              <div><small>{new Date(run.created_at).toLocaleString()}</small></div>
+              <div><small>{run.created_at ? new Date(run.created_at).toLocaleString() : '—'}</small></div>
+              {run.verification_status && (
+                <div><small>Status: {run.verification_status}</small></div>
+              )}
             </Link>
           </li>
         ))}

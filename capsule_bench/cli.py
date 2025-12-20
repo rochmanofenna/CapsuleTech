@@ -9,9 +9,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Tuple
+from urllib import error as url_error
+from urllib import request as url_request
 
 import click
 
+from .artifacts import ArtifactPublisher, records_to_json, save_manifest
 from .manifests import ManifestBundle, collect_manifests
 from .packing import create_capsulepack
 
@@ -88,6 +91,55 @@ def _load_capsule_path(run_dir: Path) -> Path:
     return pipeline_dir / "strategy_capsule.json"
 
 
+def _register_relay_ingest(relay_base: str, run_id: str, admin_token: str | None) -> dict[str, Any]:
+    relay_base = relay_base.rstrip("/")
+    url = f"{relay_base}/runs/{run_id}/ingest_token"
+    payload = json.dumps({}).encode("utf-8")
+    req = url_request.Request(url, data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    if admin_token:
+        req.add_header("Authorization", f"Bearer {admin_token}")
+    try:
+        with url_request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8")
+    except url_error.HTTPError as exc:  # pragma: no cover - network dependent
+        raise click.ClickException(f"relay registration failed ({exc.code}): {exc.reason}") from exc
+    except url_error.URLError as exc:  # pragma: no cover - network dependent
+        raise click.ClickException(f"relay registration failed: {exc.reason}") from exc
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:  # pragma: no cover - unexpected response
+        raise click.ClickException("relay registration returned invalid JSON") from exc
+    required = {"ingest_url", "token", "expires_at"}
+    if not required.issubset(data):
+        raise click.ClickException("relay registration missing fields")
+    return data
+
+
+def _submit_artifact_manifest(
+    relay_base: str | None,
+    run_id: str,
+    artifacts: list[dict[str, Any]],
+    admin_token: str | None,
+) -> None:
+    if not relay_base:
+        return
+    relay_base = relay_base.rstrip("/")
+    url = f"{relay_base}/runs/{run_id}/artifacts"
+    payload = json.dumps({"artifacts": artifacts}).encode("utf-8")
+    req = url_request.Request(url, data=payload, method="PUT")
+    req.add_header("Content-Type", "application/json")
+    if admin_token:
+        req.add_header("Authorization", f"Bearer {admin_token}")
+    try:
+        with url_request.urlopen(req, timeout=10):
+            return
+    except url_error.HTTPError as exc:  # pragma: no cover - network dependent
+        raise click.ClickException(f"artifact manifest registration failed ({exc.code}): {exc.reason}") from exc
+    except url_error.URLError as exc:  # pragma: no cover - network dependent
+        raise click.ClickException(f"artifact manifest registration failed: {exc.reason}") from exc
+
+
 @click.group()
 def cli() -> None:
     """capsule-bench CLI entrypoint."""
@@ -108,6 +160,13 @@ def cli() -> None:
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Path to secp256k1 private key used to sign the capsule.",
 )
+@click.option("--relay-base", type=str, help="Relay base URL (e.g. https://capsuletech.onrender.com)")
+@click.option(
+    "--relay-admin-token",
+    type=str,
+    envvar="CAPSULE_RELAY_ADMIN_TOKEN",
+    help="Admin token used to request relay ingest credentials.",
+)
 @click.argument("pipeline_args", nargs=-1, type=str)
 def run_command(
     backend: str,
@@ -120,6 +179,8 @@ def run_command(
     run_id: str | None,
     trace_id: str | None,
     private_key: Path | None,
+    relay_base: str | None,
+    relay_admin_token: str | None,
     pipeline_args: Tuple[str, ...],
 ) -> None:
     """Execute the prover pipeline and capture manifests."""
@@ -135,6 +196,11 @@ def run_command(
     policy_copy = run_dir / "policy.json"
     shutil.copy2(policy, policy_copy)
     events_path = run_dir / "events.jsonl"
+
+    relay_registration = None
+    if relay_base:
+        relay_registration = _register_relay_ingest(relay_base, run_id, relay_admin_token)
+        click.echo(f"relay ingest token issued (expires at {relay_registration['expires_at']})")
 
     try:
         _run_pipeline(
@@ -174,6 +240,10 @@ def run_command(
         "track_id": track_id,
         "docker_image_digest": docker_image_digest,
     }
+    if relay_registration:
+        run_meta["relay_ingest_url"] = relay_registration["ingest_url"]
+        run_meta["relay_ingest_token"] = relay_registration["token"]
+        run_meta["relay_token_expires_at"] = relay_registration["expires_at"]
     (run_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2))
     click.echo(f"capsule-bench run completed: {run_dir}")
 
@@ -181,15 +251,46 @@ def run_command(
 @cli.command("pack")
 @click.option("--run-dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
 @click.option("--pack-name", type=str, help="Override output tgz name (without extension).")
-def pack_command(run_dir: Path, pack_name: str | None) -> None:
+@click.option(
+    "--upload-artifacts/--no-upload-artifacts",
+    default=False,
+    help="Upload capsulepack artifacts to configured storage (R2/local).",
+)
+@click.option("--relay-base", type=str, help="Relay base URL for artifact manifest registration.")
+@click.option(
+    "--relay-admin-token",
+    type=str,
+    envvar="CAPSULE_RELAY_ADMIN_TOKEN",
+    help="Admin token for relay artifact registration.",
+)
+def pack_command(
+    run_dir: Path,
+    pack_name: str | None,
+    upload_artifacts: bool,
+    relay_base: str | None,
+    relay_admin_token: str | None,
+) -> None:
     """Assemble capsulepack.tgz from a previous run."""
 
     run_meta_path = run_dir / "run_meta.json"
     if not run_meta_path.exists():
         raise click.ClickException(f"missing run_meta.json in {run_dir}")
+    run_meta = json.loads(run_meta_path.read_text())
     pack_dir, tar_path = create_capsulepack(run_meta_path, pack_name=pack_name)
     click.echo(f"capsulepack assembled at {pack_dir}")
     click.echo(f"archive written to {tar_path}")
+
+    if upload_artifacts:
+        publisher = ArtifactPublisher()
+        run_id = run_meta.get("run_id") or pack_name or "capsule_run"
+        records = publisher.publish(run_id, pack_dir, tar_path)
+        manifest = records_to_json(records)
+        manifest_path = run_dir / "artifact_manifest.json"
+        save_manifest(manifest, manifest_path)
+        click.echo(f"uploaded {len(manifest)} artifacts (manifest at {manifest_path})")
+        _submit_artifact_manifest(relay_base, run_id, manifest, relay_admin_token)
+        if relay_base:
+            click.echo("artifact manifest registered with relay")
 
 
 def main() -> None:
