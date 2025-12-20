@@ -88,14 +88,14 @@ The `capsule-bench` CLI wraps the pipeline, captures hardware/toolchain manifest
 the canonical `capsulepack.tgz` artifact.
 
 ```
-PYTHONPATH=. .venv/bin/python scripts/capsule_bench.py run \
+. .venv/bin/capsule-bench run \
     --backend geom \
     --policy policies/benchmark_policy_v1.json \
     --policy-id baseline_policy_v1 \
     --track-id baseline_no_accel \
     --docker-image-digest sha256:<digest>
 
-PYTHONPATH=. .venv/bin/python scripts/capsule_bench.py pack --run-dir out/capsule_runs/run_YYYYMMDD_HHMMSS
+. .venv/bin/capsule-bench pack --run-dir out/capsule_runs/run_YYYYMMDD_HHMMSS
 ```
 
 `run` captures manifests and executes `scripts/run_pipeline.py`; `pack` enforces the canonical
@@ -153,7 +153,9 @@ add `window.API_BASE = "https://your-worker.workers.dev";` before loading
 The worker proxies `/api/runs` and `/api/runs/:id/events` to your FastAPI relay.
 Set `RELAY_BASE` in `wrangler.toml` (or in the Cloudflare dashboard) to the base
 URL of the relay, e.g. `https://relay.capsuletech.com`. Redeploy with
-`npx wrangler deploy` so the UI reflects live data.
+`npx wrangler deploy` so the UI reflects live data. The relay itself can point
+at a Postgres database by setting the `DATABASE_URL` environment variable; if it
+is unset, it falls back to local JSONL files under `server_data/events/`.
 
 ## Benchmarks
 

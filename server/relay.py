@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import os
 from datetime import datetime, timezone
 from typing import Dict, Set
 
@@ -11,10 +12,27 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from .event_store import EventStore
+try:
+    from .event_store_pg import PostgresEventStore
+except ImportError:  # pragma: no cover - psycopg optional locally
+    PostgresEventStore = None
+
+
+def _build_store() -> EventStore:
+    dsn = os.environ.get("DATABASE_URL")
+    if dsn and PostgresEventStore is not None:
+        try:
+            print("[relay] using PostgresEventStore", flush=True)
+            return PostgresEventStore(dsn)
+        except Exception as exc:  # pragma: no cover - log fallback
+            print(f"[relay] PostgresEventStore init failed: {exc}; falling back", flush=True)
+    path_store = EventStore(Path("server_data/events"))
+    path_store.load_existing()
+    return path_store
+
 
 app = FastAPI(title="CapsuleBench Relay")
-store = EventStore(Path("server_data/events"))
-store.load_existing()
+store = _build_store()
 
 _subscriptions: Dict[str, Set[WebSocket]] = {}
 _sub_lock = asyncio.Lock()

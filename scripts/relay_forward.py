@@ -6,6 +6,8 @@ import argparse
 import time
 from pathlib import Path
 
+from contextlib import closing
+
 from websocket import WebSocketConnectionClosedException, create_connection
 
 
@@ -14,7 +16,7 @@ def _forward_events(events_path: Path, ingest_url: str, *, skip_history: bool, p
     if not events_path.exists():
         raise FileNotFoundError(f"events log missing: {events_path}")
 
-    with events_path.open("r", encoding="utf-8") as fh, create_connection(ingest_url) as ws:
+    with events_path.open("r", encoding="utf-8") as fh, closing(create_connection(ingest_url)) as ws:
         if not skip_history:
             for line in fh:
                 data = line.strip()
