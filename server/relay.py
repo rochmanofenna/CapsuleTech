@@ -8,7 +8,7 @@ import os
 from datetime import datetime, timezone
 from typing import Dict, Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import JSONResponse
 
 from .event_store import EventStore
@@ -54,7 +54,7 @@ async def ingest_socket(ws: WebSocket, run_id: str) -> None:
     try:
         while True:
             message = await ws.receive_text()
-            store.append(run_id, message)
+            await asyncio.to_thread(store.append, run_id, message)
             await _broadcast(run_id, message)
     except WebSocketDisconnect:
         return
@@ -79,10 +79,15 @@ async def subscribe_socket(ws: WebSocket, run_id: str) -> None:
 
 
 @app.get("/runs/{run_id}/events")
-async def get_events(run_id: str, since_seq: int | None = None) -> JSONResponse:
-    history = store.history(run_id, since_seq)
-    payload = [json.loads(line) for line in history]
-    return JSONResponse({"run_id": run_id, "events": payload})
+async def get_events(run_id: str, after_seq: int | None = Query(default=None)) -> JSONResponse:
+    history = store.history(run_id, after_seq)
+    payload = []
+    for line in history:
+        try:
+            payload.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return JSONResponse(payload)
 
 
 @app.get("/runs/{run_id}/snapshot")
@@ -141,7 +146,30 @@ async def list_runs() -> JSONResponse:
         if meta:
             runs.append(meta)
     runs.sort(key=lambda item: item.get("created_at") or "", reverse=True)
-    return JSONResponse({"runs": runs})
+    return JSONResponse(runs)
+
+
+@app.get("/runs/{run_id}")
+async def run_detail(run_id: str) -> dict:
+    history = store.history(run_id)
+    if not history:
+        raise HTTPException(status_code=404, detail="run not found")
+    metadata = _run_metadata(run_id) or {"run_id": run_id}
+    # include latest events (e.g., last 100)
+    latest_events = []
+    for line in history[-100:]:
+        try:
+            latest_events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    last_seq = 0
+    if latest_events:
+        last_seq = max(int(evt.get("seq", 0)) for evt in latest_events)
+    return {
+        "run": metadata,
+        "events": latest_events,
+        "last_seq": last_seq,
+    }
 @app.get("/")
 async def root() -> dict:
     return {"service": "capsule relay", "ok": True}

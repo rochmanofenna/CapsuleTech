@@ -19,7 +19,14 @@ function notFound() {
   return withCors(new Response("Not found", { status: 404 }));
 }
 
-async function proxyJson(path, env) {
+function normalize(payload, key) {
+  if (payload && typeof payload === "object" && !Array.isArray(payload) && payload[key] !== undefined) {
+    return payload;
+  }
+  return { [key]: payload };
+}
+
+async function proxyJson(path, env, wrapKey) {
   if (!env.RELAY_BASE) {
     return jsonResponse({
       error: "Relay base URL missing",
@@ -37,6 +44,9 @@ async function proxyJson(path, env) {
   } catch (err) {
     return jsonResponse({ error: "Relay returned non-JSON payload" }, 502);
   }
+  if (wrapKey) {
+    payload = normalize(payload, wrapKey);
+  }
   return jsonResponse(payload, upstream.status);
 }
 
@@ -46,12 +56,18 @@ async function handleApi(request, env) {
     return jsonResponse({ ok: true, worker: "capsuletech" });
   }
   if (url.pathname === "/api/runs") {
-    return proxyJson("/runs", env);
+    return proxyJson(`/runs${url.search}`, env, "runs");
+  }
+  const detailMatch = url.pathname.match(/^\/api\/runs\/(.+?)$/);
+  if (detailMatch && !url.pathname.endsWith("/events")) {
+    const runId = decodeURIComponent(detailMatch[1]);
+    return proxyJson(`/runs/${encodeURIComponent(runId)}${url.search}`, env, "run");
   }
   const match = url.pathname.match(/^\/api\/runs\/(.+?)\/events$/);
   if (match) {
     const runId = decodeURIComponent(match[1]);
-    return proxyJson(`/runs/${encodeURIComponent(runId)}/events`, env);
+    const qs = url.search ? url.search : "";
+    return proxyJson(`/runs/${encodeURIComponent(runId)}/events${qs}`, env, "events");
   }
   return notFound();
 }

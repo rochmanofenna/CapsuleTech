@@ -1,0 +1,110 @@
+:root {
+  color-scheme: dark;
+  font-family: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #0f1117;
+  color: #f6f7fb;
+}
+
+a {
+  color: inherit;
+}
+
+.app-shell header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 28px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.app-shell header h1 {
+  margin: 0;
+}
+
+.app-shell main {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 24px;
+  padding: 24px;
+}
+
+.runs,
+.details {
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 18px;
+  min-height: 300px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.run-item {
+  list-style: none;
+  margin: 0;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  transition: border 0.2s ease, background 0.2s ease;
+}
+
+.run-item:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.runs ul {
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+button {
+  background: #4c6ef5;
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.events {
+  max-height: 520px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.event-card {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 12px;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+@media (max-width: 960px) {
+  .app-shell main {
+    grid-template-columns: 1fr;
+  }
+}
