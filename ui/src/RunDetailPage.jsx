@@ -16,6 +16,7 @@ export default function RunDetailPage() {
   const { runId } = useParams()
   const [meta, setMeta] = useState(null)
   const [events, setEvents] = useState([])
+  const [artifacts, setArtifacts] = useState([])
   const [status, setStatus] = useState('loading')
   const bottomRef = useRef(null)
   const lastSeqRef = useRef(0)
@@ -32,6 +33,7 @@ export default function RunDetailPage() {
         const data = await resp.json()
         const runMeta = data.run || data
         setMeta(runMeta)
+        setArtifacts(data.artifacts || [])
         const initialEvents = data.events || []
         setEvents(initialEvents)
         lastSeqRef.current = data.last_seq || computeMaxSeq(initialEvents)
@@ -82,6 +84,23 @@ export default function RunDetailPage() {
           <div><strong>Policy:</strong> {meta.policy_id}</div>
           <div><strong>Track:</strong> {meta.track_id}</div>
           <div><strong>Created:</strong> {new Date(meta.created_at).toLocaleString()}</div>
+        </div>
+      )}
+      {artifacts.length > 0 && (
+        <div className="artifact-list">
+          <h3>Artifacts</h3>
+          <ul>
+            {artifacts.map((artifact) => (
+              <li key={artifact.name}>
+                <a
+                  href={`${API}/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifact.name)}`}
+                  download
+                >
+                  {artifact.name} ({(artifact.size_bytes / 1024).toFixed(1)} KB)
+                </a>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       <div className="events" id="event-log">
