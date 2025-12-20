@@ -135,7 +135,10 @@ def _submit_artifact_manifest(
         with url_request.urlopen(req, timeout=10):
             return
     except url_error.HTTPError as exc:  # pragma: no cover - network dependent
-        raise click.ClickException(f"artifact manifest registration failed ({exc.code}): {exc.reason}") from exc
+        detail = exc.read().decode("utf-8", "ignore") if hasattr(exc, "read") else exc.reason
+        raise click.ClickException(
+            f"artifact manifest registration failed ({exc.code}): {detail or exc.reason}"
+        ) from exc
     except url_error.URLError as exc:  # pragma: no cover - network dependent
         raise click.ClickException(f"artifact manifest registration failed: {exc.reason}") from exc
 

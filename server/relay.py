@@ -17,7 +17,7 @@ from pathlib import Path
 import sys
 from typing import Deque, Dict, List, Set
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, Query
+from fastapi import BackgroundTasks, Body, Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -473,7 +473,7 @@ async def artifact_meta(run_id: str, artifact_path: str) -> dict:
 @app.put("/runs/{run_id}/artifacts")
 async def register_artifacts(
     run_id: str,
-    manifest: ArtifactManifest,
+    manifest: ArtifactManifest = Body(...),
     authorization: str | None = Header(default=None),
 ):
     if not _run_metadata(run_id):

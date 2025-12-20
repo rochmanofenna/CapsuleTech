@@ -45,6 +45,7 @@ out_demo/
 tmp_check_proof/
 tmp_debug_da/
 capsule_bundle/
+artifacts_out/
 
 # Ignore specific generated file types in the root directory
 # (This is more precise than a blanket **/*.json)
@@ -109,3 +110,7 @@ ui/node_modules/
 
 .gemini/
 gha-creds-*.json
+
+# Local helper scripts (not tracked)
+scripts/deploy_stack.sh
+scripts/run_capsule_flow.sh
