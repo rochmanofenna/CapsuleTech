@@ -56,14 +56,20 @@ function EvidencePanel({ verification }) {
     )
   }
   const report = verification.report || {}
+  const bindingOk =
+    report.row_index_commitment_ok ?? report.binding_ok ?? false
+  const availabilityOk =
+    report.da_audit_verified ?? report.availability_ok ?? false
+  const enforcementOk =
+    report.policy_verified ?? report.policy_ok ?? false
   const renderCheck = (value) => (value ? '✅' : '❌')
   return (
     <div className="evidence-panel">
       <h3>Evidence</h3>
       <div className="grid evidence-grid">
-        <div><strong>Binding</strong> {renderCheck(report.binding_ok)}</div>
-        <div><strong>Availability</strong> {renderCheck(report.availability_ok)}</div>
-        <div><strong>Enforcement</strong> {renderCheck(report.policy_ok)}</div>
+        <div><strong>Binding</strong> {renderCheck(bindingOk)}</div>
+        <div><strong>Availability</strong> {renderCheck(availabilityOk)}</div>
+        <div><strong>Enforcement</strong> {renderCheck(enforcementOk)}</div>
       </div>
       {report.error_code && (
         <div className="reason-code">
