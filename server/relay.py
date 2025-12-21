@@ -78,6 +78,28 @@ _token_lock = asyncio.Lock()
 _rate_counters: Dict[str, Deque[float]] = defaultdict(deque)
 _rate_lock = asyncio.Lock()
 
+class TokenRequest(BaseModel):
+    ttl_seconds: int | None = None
+
+
+class TokenResponse(BaseModel):
+    ingest_url: str
+    token: str
+    expires_at: float
+
+
+class ArtifactEntry(BaseModel):
+    name: str
+    size_bytes: int
+    content_type: str
+    storage: str = "local"
+    object_key: str | None = None
+
+
+class ArtifactManifest(BaseModel):
+    artifacts: List[ArtifactEntry]
+
+
 _subscriptions: Dict[str, Set[WebSocket]] = {}
 _sub_lock = asyncio.Lock()
 
@@ -503,28 +525,6 @@ async def trigger_verification(run_id: str, background: BackgroundTasks):
         raise HTTPException(status_code=404, detail="run not found")
     background.add_task(_verification_task, run_id)
     return {"status": "VERIFYING"}
-
-
-class TokenRequest(BaseModel):
-    ttl_seconds: int | None = None
-
-
-class TokenResponse(BaseModel):
-    ingest_url: str
-    token: str
-    expires_at: float
-
-
-class ArtifactEntry(BaseModel):
-    name: str
-    size_bytes: int
-    content_type: str
-    storage: str = "local"
-    object_key: str | None = None
-
-
-class ArtifactManifest(BaseModel):
-    artifacts: List[ArtifactEntry]
 
 
 @app.post("/runs/{run_id}/ingest_token", response_model=TokenResponse)
