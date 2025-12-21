@@ -46,6 +46,7 @@ tmp_check_proof/
 tmp_debug_da/
 capsule_bundle/
 artifacts_out/
+node_modules/
 
 # Ignore specific generated file types in the root directory
 # (This is more precise than a blanket **/*.json)
