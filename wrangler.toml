@@ -1,9 +1,9 @@
 name = "capsuletech"
 main = "worker/index.js"
 compatibility_date = "2025-12-19"
+pages_build_output_dir = "ui/dist"
 
 [vars]
-pages_build_output_dir = "./ui"
 RELAY_BASE = "https://capsuletech.onrender.com"
 
 [[r2_buckets]]
