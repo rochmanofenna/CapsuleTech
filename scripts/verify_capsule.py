@@ -905,9 +905,17 @@ def _verify_capsule_core(
             archive_root = Path(provider_root)
         if archive_root is None:
             return E062_ROW_ARCHIVE_MISSING, None
+        archive_root = _ensure_local_artifact(Path(archive_root))
+        resolved_handles: list[str] = []
+        for handle in chunk_handles:
+            candidate = Path(handle)
+            if not candidate.is_absolute():
+                candidate = archive_root / candidate
+            candidate = _ensure_local_artifact(candidate)
+            resolved_handles.append(str(candidate))
         provider = LocalFileSystemProvider(
             archive_root=archive_root,
-            chunk_handles=chunk_handles,
+            chunk_handles=resolved_handles,
             chunk_roots=chunk_roots,
             tree_arity=chunk_tree_arity,
         )
