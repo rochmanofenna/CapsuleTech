@@ -6,7 +6,9 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -37,6 +39,25 @@ from bef_zk.spec import (
 )
 from bef_zk.verifier_errors import *
 from scripts.artifact_manifest import encoding_for_path, load_manifest
+
+try:  # Optional dependency for downloading artifacts from R2
+    import boto3
+    from botocore.config import Config as BotoConfig
+except ImportError:  # pragma: no cover - boto3 may be missing locally
+    boto3 = None
+
+ARTIFACTS_ROOT = Path(os.environ.get("ARTIFACTS_ROOT", "server_data/artifacts"))
+R2_ENDPOINT_URL = os.environ.get("R2_ENDPOINT_URL")
+R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME")
+R2_PREFIX = os.environ.get("R2_PREFIX", "")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
+AWS_REGION = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "auto"))
+
+_R2_CLIENT = None
+_ARTIFACT_MANIFEST_CACHE: Dict[str, List[dict]] = {}
+_DOWNLOADED_CACHE: Dict[tuple, Path] = {}
+_CURRENT_RUN_ID: str | None = None
 from scripts.geom_programs import GEOM_PROGRAM
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +66,81 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # ---------------------------------------------------------------------------
 # Helper utilities
 # ---------------------------------------------------------------------------
+
+
+def _get_r2_client():  # pragma: no cover - requires boto3 + env
+    global _R2_CLIENT
+    if _R2_CLIENT is not None:
+        return _R2_CLIENT
+    if not all([boto3, R2_ENDPOINT_URL, R2_BUCKET_NAME, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY]):
+        return None
+    _R2_CLIENT = boto3.client(
+        "s3",
+        endpoint_url=R2_ENDPOINT_URL,
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        region_name=AWS_REGION,
+        config=BotoConfig(signature_version="s3v4", s3={"addressing_style": "path"}),
+    )
+    return _R2_CLIENT
+
+
+def _load_manifest_entries(run_id: str) -> List[dict]:
+    if run_id in _ARTIFACT_MANIFEST_CACHE:
+        return _ARTIFACT_MANIFEST_CACHE[run_id]
+    manifest_path = ARTIFACTS_ROOT / run_id / "artifacts.json"
+    if not manifest_path.exists():
+        entries: List[dict] = []
+    else:
+        try:
+            entries = json.loads(manifest_path.read_text())
+        except json.JSONDecodeError:
+            entries = []
+    _ARTIFACT_MANIFEST_CACHE[run_id] = entries
+    return entries
+
+
+def _download_r2_object(run_id: str, object_key: str, filename: str) -> Path | None:
+    client = _get_r2_client()
+    if client is None:
+        return None
+    cache_key = (run_id, object_key)
+    if cache_key in _DOWNLOADED_CACHE:
+        return _DOWNLOADED_CACHE[cache_key]
+    tmp_dir = ARTIFACTS_ROOT / run_id / "_cache"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    dest = tmp_dir / filename
+    try:
+        client.download_file(R2_BUCKET_NAME, object_key, str(dest))
+    except Exception:  # pragma: no cover - network dependent
+        return None
+    _DOWNLOADED_CACHE[cache_key] = dest
+    return dest
+
+
+def _ensure_local_artifact(path: Path) -> Path:
+    if path.exists():
+        return path
+    run_id = _CURRENT_RUN_ID
+    if not run_id:
+        return path
+    entries = _load_manifest_entries(run_id)
+    for entry in entries:
+        entry_name = entry.get("name") or ""
+        object_key = entry.get("object_key")
+        storage = (entry.get("storage") or "local").lower()
+        if not object_key:
+            continue
+        if entry_name.endswith(path.name) or object_key.endswith(path.name):
+            if storage == "local":
+                candidate = Path(object_key)
+                if candidate.exists():
+                    return candidate
+            elif storage == "r2":
+                downloaded = _download_r2_object(run_id, object_key, path.name)
+                if downloaded and downloaded.exists():
+                    return downloaded
+    return path
 
 
 def _resolve(base: Path, entry: Path | str | dict | None) -> Path:
@@ -64,19 +160,21 @@ def _resolve(base: Path, entry: Path | str | dict | None) -> Path:
             continue
         path = Path(raw)
         if path.is_absolute():
-            return path
+            return _ensure_local_artifact(path)
         candidate = base / path
+        candidate = _ensure_local_artifact(candidate)
         if candidate.exists():
             return candidate.resolve()
         repo_candidate = (REPO_ROOT / path)
+        repo_candidate = _ensure_local_artifact(repo_candidate)
         if repo_candidate.exists():
             return repo_candidate.resolve()
     # Fall back to the first candidate even if it doesn't exist locally yet
     raw = candidates[0]
     path = Path(raw)
     if path.is_absolute():
-        return path
-    return (base / path).resolve()
+        return _ensure_local_artifact(path)
+    return _ensure_local_artifact((base / path).resolve())
 
 
 def _entry_str(entry: Path | str | dict | None) -> str | None:
@@ -154,6 +252,7 @@ def _load_chunk_roots(info: dict | None, base: Path) -> tuple[list[bytes] | None
 def _compute_payload_hash(path: Path) -> str:
     magic = b"\xBE\xF0\xC0\xDE"
     hasher = hashlib.sha256()
+    path = _ensure_local_artifact(path)
     with path.open("rb") as fh:
         header = fh.read(6)
         if len(header) < 6:
@@ -174,6 +273,7 @@ def _compute_payload_hash(path: Path) -> str:
 
 def _compute_file_hash(path: Path) -> str:
     hasher = hashlib.sha256()
+    path = _ensure_local_artifact(path)
     with path.open("rb") as fh:
         while True:
             chunk = fh.read(1 << 20)
@@ -511,6 +611,9 @@ def _verify_capsule_core(
         return err, None
     if capsule.get("schema") != "bef_capsule_v1":
         return E003_SCHEMA_UNSUPPORTED, None
+
+    global _CURRENT_RUN_ID
+    _CURRENT_RUN_ID = capsule.get("trace_id") or capsule.get("run_id")
 
     capsule_hash = capsule.get("capsule_hash")
     if not capsule_hash:
