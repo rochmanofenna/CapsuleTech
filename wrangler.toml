@@ -1,5 +1,5 @@
 name = "capsuletech"
-pages_build_output_dir = "ui"
+pages_build_output_dir = "ui/dist"
 compatibility_date = "2025-12-19"
 
 [vars]
