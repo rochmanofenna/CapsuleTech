@@ -143,6 +143,52 @@ class ManifestBundle:
     anchor_ref: str
 
 
+def _manifest_anchor_message(anchor_ref: str) -> bytes:
+    anchor = (anchor_ref or "").strip().lower()
+    digest = anchor.split(":", 1)[1] if ":" in anchor else anchor
+    return bytes.fromhex(digest)
+
+
+def write_manifest_signature(
+    bundle: ManifestBundle,
+    *,
+    signer_id: str,
+    private_key_hex: str,
+) -> Path:
+    """Write manifest_signature.json for the collected bundle.
+
+    The signature binds the capsulebench manifest anchor to `signer_id` using a
+    secp256k1 recoverable signature so verifiers can authenticate manifests.
+    """
+
+    if not signer_id:
+        raise ValueError("signer_id is required for manifest signing")
+    key_material = private_key_hex.strip()
+    if key_material.startswith("0x"):
+        key_material = key_material[2:]
+    if not key_material:
+        raise ValueError("manifest signer key is empty")
+    try:
+        key_bytes = bytes.fromhex(key_material)
+    except ValueError as exc:  # pragma: no cover - invalid operator input
+        raise ValueError("manifest signer key must be hex-encoded") from exc
+    try:
+        from coincurve import PrivateKey
+    except ImportError as exc:  # pragma: no cover - optional dependency missing
+        raise RuntimeError("coincurve package is required to sign manifests") from exc
+
+    message = _manifest_anchor_message(bundle.anchor_ref)
+    signature = PrivateKey(key_bytes).sign_recoverable(message, hasher=None).hex()
+    payload = {
+        "schema": "capsule_manifest_signature_v1",
+        "signer_id": signer_id,
+        "signature": signature,
+    }
+    signature_path = bundle.base_dir / "manifest_signature.json"
+    signature_path.write_text(json.dumps(payload, indent=2))
+    return signature_path
+
+
 def collect_manifests(output_dir: Path) -> ManifestBundle:
     output_dir.mkdir(parents=True, exist_ok=True)
     manifests = {
@@ -169,6 +215,25 @@ def collect_manifests(output_dir: Path) -> ManifestBundle:
     index_path.write_text(json.dumps(index, indent=2))
     files["manifest_index"] = index_path
     hashes["manifest_index"] = f"sha256:{_hash_file(index_path)}"
-    anchor_payload = json.dumps({"schema": "capsule_bench_manifest_anchor_v1", "hashes": hashes}, sort_keys=True).encode()
+    return load_manifest_bundle(output_dir)
+
+
+def load_manifest_bundle(manifest_dir: Path) -> ManifestBundle:
+    """Load an existing manifest directory and recompute its anchor."""
+
+    manifest_dir = manifest_dir.expanduser().resolve()
+    names = ["hardware_manifest", "os_fingerprint", "toolchain_manifest", "manifest_index"]
+    files: dict[str, Path] = {}
+    hashes: dict[str, str] = {}
+    for name in names:
+        path = manifest_dir / f"{name}.json"
+        if not path.exists():
+            raise FileNotFoundError(f"{name}.json missing from {manifest_dir}")
+        files[name] = path
+        hashes[name] = f"sha256:{_hash_file(path)}"
+    anchor_payload = json.dumps(
+        {"schema": "capsule_bench_manifest_anchor_v1", "hashes": hashes},
+        sort_keys=True,
+    ).encode()
     anchor_ref = f"capsulebench_manifest_v1:{_hash_bytes(anchor_payload)}"
-    return ManifestBundle(base_dir=output_dir, files=files, hashes=hashes, anchor_ref=anchor_ref)
+    return ManifestBundle(base_dir=manifest_dir, files=files, hashes=hashes, anchor_ref=anchor_ref)

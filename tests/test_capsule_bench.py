@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from capsule_bench.manifests import collect_manifests
+import pytest
+
+from capsule_bench.manifests import (
+    collect_manifests,
+    load_manifest_bundle,
+    write_manifest_signature,
+)
 from capsule_bench.packing import write_pack_meta
 
 
@@ -33,3 +39,25 @@ def test_write_pack_meta(tmp_path: Path) -> None:
     entries = {entry["path"] for entry in meta["entries"]}
     assert "capsule.json" in entries
     assert "policy.json" in entries
+
+
+def test_write_manifest_signature(tmp_path: Path) -> None:
+    pytest.importorskip("coincurve")
+    bundle = collect_manifests(tmp_path)
+    signer_id = "test_manifest"
+    sig_path = write_manifest_signature(
+        bundle,
+        signer_id=signer_id,
+        private_key_hex="3" * 64,
+    )
+    payload = json.loads(sig_path.read_text())
+    assert payload["signer_id"] == signer_id
+    sig_bytes = bytes.fromhex(payload["signature"])
+    assert len(sig_bytes) == 65
+
+
+def test_load_manifest_bundle_reads_existing_files(tmp_path: Path) -> None:
+    bundle = collect_manifests(tmp_path)
+    loaded = load_manifest_bundle(tmp_path)
+    assert loaded.anchor_ref == bundle.anchor_ref
+    assert set(loaded.files.keys()) == set(bundle.files.keys())

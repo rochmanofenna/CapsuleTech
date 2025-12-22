@@ -80,6 +80,7 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_capsule_verify.py -k da --max
 - `docs/benchmark_policy_schema.json` – JSON schema for `bef_benchmark_policy_v1`
 - `docs/hssa_da_protocol.md` – DA sampling protocol and guarantees
 - `docs/stc_da_profiles.md` – DA policy profiles
+- `docs/security_model.md` – adversary model, binding points and security claims for Capsules + STC
 - `server/README.md` – FastAPI relay for CapsuleBench live event streams
 
 ## CapsuleBench CLI
@@ -93,7 +94,9 @@ the canonical `capsulepack.tgz` artifact.
     --policy policies/benchmark_policy_v1.json \
     --policy-id baseline_policy_v1 \
     --track-id baseline_no_accel \
-    --docker-image-digest sha256:<digest>
+    --docker-image-digest sha256:<digest> \
+    --manifest-signer-id my_lab_manifest \
+    --manifest-signer-key secrets/manifest_signer.hex
 
 . .venv/bin/capsule-bench pack --run-dir out/capsule_runs/run_YYYYMMDD_HHMMSS
 ```
@@ -110,7 +113,9 @@ capsule-bench run \
     --policy-id demo_policy_v1 \
     --policy-version 1.0 \
     --track-id demo_geom_fast \
-    --private-key demo_assets/demo_private_key.hex
+    --private-key demo_assets/demo_private_key.hex \
+    --manifest-signer-id demo_manifest \
+    --manifest-signer-key demo_assets/demo_manifest_key.hex
 ```
 
 Then verify with policy + ACL enforcement:
@@ -125,6 +130,35 @@ PYTHONPATH=. .venv/bin/python scripts/verify_capsule.py \
 
 > The signing key in `demo_assets/demo_private_key.hex` is public and intended
 > only for local demos. Generate and protect your own keys for anything real.
+
+### Manifest signatures and policy enforcement
+
+`capsule-bench run` writes `manifests/manifest_signature.json` whenever you
+provide `--manifest-signer-id` (or `CAPSULE_MANIFEST_SIGNER_ID`) together with
+`--manifest-signer-key` (or `CAPSULE_MANIFEST_SIGNER_KEY`). The signer id must
+match an entry in the verifier’s `config/manifest_signers.json`, and the key can
+be specified either as a path to a hex file or an inline hex string. Without a
+signature the capsule still verifies at `proof_only`, but policy enforcement
+fails closed with `E106_MANIFEST_SIGNATURE_MISSING`.
+
+For demos, generate a throwaway secp256k1 key pair, add the public key to your
+verifier config, and point `--manifest-signer-key` at the private key so the
+manifests are authenticated.
+
+If you run `scripts/run_pipeline.py` directly, collect manifests with
+`capsule_bench.manifests.collect_manifests` (or any equivalent process), then
+sign them via:
+
+```
+PYTHONPATH=. python scripts/sign_manifest.py ./manifests \
+    --signer-id my_lab_manifest \
+    --private-key secrets/manifest_signer.hex
+```
+
+Trusted relay/manifest registries also need reproducible hashes. Use
+`scripts/compute_trust_roots.py` to print the SHA-256 root after editing
+`config/trusted_relays.json` or `config/manifest_signers.json`; the verifier’s
+`--trusted-*-root` flags must match these values when you roll keys.
 
 ### Streaming events to the relay
 

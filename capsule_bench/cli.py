@@ -15,7 +15,7 @@ from urllib import request as url_request
 import click
 
 from .artifacts import ArtifactPublisher, records_to_json, save_manifest
-from .manifests import ManifestBundle, collect_manifests
+from .manifests import ManifestBundle, collect_manifests, write_manifest_signature
 from .packing import create_capsulepack
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +39,23 @@ def _hash_policy(policy_path: Path) -> str:
     return hasher.hexdigest()
 
 
+def _load_manifest_signer_key(spec: str) -> str:
+    """Resolve a manifest signer key spec (path or hex string) to raw hex."""
+
+    candidate = Path(spec)
+    if candidate.exists():
+        data = candidate.read_text().strip()
+    else:
+        data = spec.strip()
+    if data.startswith("0x"):
+        data = data[2:]
+    if not data:
+        raise ValueError("manifest signer key is empty")
+    # Validate hex early so we can give a nice error message before signing
+    bytes.fromhex(data)
+    return data
+
+
 def _run_pipeline(
     pipeline_args: Tuple[str, ...],
     *,
@@ -53,6 +70,11 @@ def _run_pipeline(
     docker_image_digest: str | None,
     events_log: Path | None,
     private_key: Path | None,
+    verification_profile: str,
+    da_challenge_file: Path | None,
+    allow_insecure_da: bool,
+    da_relay_url: str | None,
+    da_relay_token: str | None,
 ) -> None:
     cmd = [
         sys.executable,
@@ -75,6 +97,8 @@ def _run_pipeline(
         "capsule_bench_manifest_v1",
         "--track-id",
         track_id,
+        "--verification-profile",
+        verification_profile,
     ]
     if docker_image_digest:
         cmd.extend(["--docker-image-digest", docker_image_digest])
@@ -82,6 +106,14 @@ def _run_pipeline(
         cmd.extend(["--events-log", str(events_log)])
     if private_key:
         cmd.extend(["--private-key", str(private_key)])
+    if da_challenge_file:
+        cmd.extend(["--da-challenge-file", str(da_challenge_file)])
+    if da_relay_url:
+        cmd.extend(["--da-relay-url", da_relay_url])
+    if da_relay_token:
+        cmd.extend(["--da-relay-token", da_relay_token])
+    if allow_insecure_da:
+        cmd.append("--allow-insecure-da-challenge")
     cmd.extend(pipeline_args)
     subprocess.run(cmd, check=True)
 
@@ -163,12 +195,46 @@ def cli() -> None:
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Path to secp256k1 private key used to sign the capsule.",
 )
+@click.option(
+    "--manifest-signer-id",
+    type=str,
+    envvar="CAPSULE_MANIFEST_SIGNER_ID",
+    help="Identifier for the manifest signing key (must match verifier trust root).",
+)
+@click.option(
+    "--manifest-signer-key",
+    type=str,
+    envvar="CAPSULE_MANIFEST_SIGNER_KEY",
+    help="Path to or literal hex of the manifest signing secp256k1 key.",
+)
 @click.option("--relay-base", type=str, help="Relay base URL (e.g. https://capsuletech.onrender.com)")
 @click.option(
     "--relay-admin-token",
     type=str,
     envvar="CAPSULE_RELAY_ADMIN_TOKEN",
     help="Admin token used to request relay ingest credentials.",
+)
+@click.option(
+    "--verification-profile",
+    type=click.Choice(["proof_only", "policy_enforced", "full"], case_sensitive=False),
+    default="full",
+)
+@click.option(
+    "--da-challenge-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to a relay-issued DA challenge JSON to embed in the capsule.",
+)
+@click.option(
+    "--allow-insecure-da-challenge/--no-allow-insecure-da-challenge",
+    default=False,
+    help="Allow capsule-bench to mint an insecure local DA challenge if no relay challenge is provided.",
+)
+@click.option("--da-relay-url", type=str, help="Base URL for the DA relay commit/challenge API.")
+@click.option(
+    "--da-relay-token",
+    type=str,
+    envvar="CAPSULE_DA_RELAY_TOKEN",
+    help="Bearer token used when contacting the DA relay.",
 )
 @click.argument("pipeline_args", nargs=-1, type=str)
 def run_command(
@@ -182,8 +248,15 @@ def run_command(
     run_id: str | None,
     trace_id: str | None,
     private_key: Path | None,
+    manifest_signer_id: str | None,
+    manifest_signer_key: str | None,
     relay_base: str | None,
     relay_admin_token: str | None,
+    verification_profile: str,
+    da_challenge_file: Path | None,
+    allow_insecure_da_challenge: bool,
+    da_relay_url: str | None,
+    da_relay_token: str | None,
     pipeline_args: Tuple[str, ...],
 ) -> None:
     """Execute the prover pipeline and capture manifests."""
@@ -195,6 +268,25 @@ def run_command(
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest_root = run_dir / "manifests"
     manifest_bundle = collect_manifests(manifest_root)
+    manifest_signature_path: Path | None = None
+    if manifest_signer_key:
+        if not manifest_signer_id:
+            raise click.ClickException("--manifest-signer-id is required when signing manifests")
+        try:
+            key_hex = _load_manifest_signer_key(manifest_signer_key)
+            manifest_signature_path = write_manifest_signature(
+                manifest_bundle,
+                signer_id=manifest_signer_id,
+                private_key_hex=key_hex,
+            )
+            click.echo(f"manifest bundle signed by {manifest_signer_id}")
+        except Exception as exc:  # pragma: no cover - depends on coincurve/file IO
+            raise click.ClickException(f"failed to sign manifest bundle: {exc}") from exc
+    elif (verification_profile or "").lower() != "proof_only":
+        click.echo(
+            "warning: manifest signer key not provided; policy enforcement will fail closed",
+            err=True,
+        )
     anchor_ref = _compute_anchor(manifest_bundle)
     policy_copy = run_dir / "policy.json"
     shutil.copy2(policy, policy_copy)
@@ -219,11 +311,17 @@ def run_command(
             docker_image_digest=docker_image_digest,
             events_log=events_path,
             private_key=private_key,
+            verification_profile=verification_profile,
+            da_challenge_file=da_challenge_file,
+            allow_insecure_da=allow_insecure_da_challenge,
+            da_relay_url=da_relay_url,
+            da_relay_token=da_relay_token,
         )
     except subprocess.CalledProcessError as exc:
         raise click.ClickException(f"pipeline execution failed: {exc}") from exc
 
     capsule_path = _load_capsule_path(run_dir)
+    da_challenge_path = pipeline_dir / "da_challenge.json"
     run_meta = {
         "schema": RUN_META_SCHEMA,
         "run_id": run_id,
@@ -242,7 +340,15 @@ def run_command(
         "manifest_root": str(manifest_root),
         "track_id": track_id,
         "docker_image_digest": docker_image_digest,
+        "verification_profile": verification_profile,
     }
+    if manifest_signature_path:
+        run_meta["manifest_signature"] = {
+            "path": str(manifest_signature_path),
+            "signer_id": manifest_signer_id,
+        }
+    if da_challenge_path.exists():
+        run_meta["da_challenge_path"] = str(da_challenge_path)
     if relay_registration:
         run_meta["relay_ingest_url"] = relay_registration["ingest_url"]
         run_meta["relay_ingest_token"] = relay_registration["token"]
@@ -279,7 +385,10 @@ def pack_command(
     if not run_meta_path.exists():
         raise click.ClickException(f"missing run_meta.json in {run_dir}")
     run_meta = json.loads(run_meta_path.read_text())
-    pack_dir, tar_path = create_capsulepack(run_meta_path, pack_name=pack_name)
+    try:
+        pack_dir, tar_path = create_capsulepack(run_meta_path, pack_name=pack_name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"capsulepack assembled at {pack_dir}")
     click.echo(f"archive written to {tar_path}")
 
