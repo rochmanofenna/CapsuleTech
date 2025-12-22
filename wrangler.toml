@@ -1,7 +1,6 @@
 name = "capsuletech"
-main = "worker/index.js"
+pages_build_output_dir = "ui"
 compatibility_date = "2025-12-19"
-pages_build_output_dir = "ui/dist"
 
 [vars]
 RELAY_BASE = "https://capsuletech.onrender.com"
