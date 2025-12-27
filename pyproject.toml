@@ -29,6 +29,7 @@ r2 = [
 
 [project.scripts]
 capsule-bench = "capsule_bench.cli:main"
+capsule = "bef_zk.capsule.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["bef_zk*", "backends*", "capsule_bench*", "server*"]
