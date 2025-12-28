@@ -86,6 +86,7 @@ class TraceAdapter(ABC):
         commitment: TraceCommitment,
         *,
         statement_hash: bytes,
+        binding_hash: bytes | None = None,
         encoding_id: str,
         trace_path: Path,
     ) -> ProofArtifacts:
@@ -97,6 +98,8 @@ class TraceAdapter(ABC):
         proof_json: str,
         statement_hash: bytes,
         artifacts: TraceArtifacts,
+        *,
+        binding_hash: bytes | None = None,
     ) -> tuple[bool, dict[str, Any], float]:
         """Run the backend verifier for sanity checks and benchmarking."""
 

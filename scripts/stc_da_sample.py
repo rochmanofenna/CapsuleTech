@@ -16,6 +16,7 @@ from stc_aok import (
     verify_fast,
 )
 from bef_zk.codec import canonical_decode, derive_capsule_seed
+from bef_zk.stc.archive import safe_join
 from scripts.artifact_manifest import load_manifest, encoding_for_path, resolve_manifest_path
 from bef_zk.stc.merkle import build_kary_levels, root_from_levels
 
@@ -87,7 +88,10 @@ def check_light_sampling(sketch: dict, provider: Dict[str, object], samples: Lis
         handle = chunk.get("archive_handle")
         if not handle:
             raise SystemExit(f"chunk {idx} missing archive_handle; cannot retrieve")
-        path = archive_root / handle
+        try:
+            path = safe_join(archive_root, handle)
+        except ValueError as e:
+            raise SystemExit(f"chunk {idx} has unsafe path: {e}")
         if not path.exists():
             raise SystemExit(f"chunk {idx} file {path} missing")
         values = [int(v) for v in json.loads(path.read_text())]
@@ -168,7 +172,13 @@ def _row_archive_info(
     root = info.get("abs_path") or info.get("path")
     if not root:
         raise SystemExit("row_archive metadata missing path/abs_path")
-    handles = list(info.get("chunk_handles", []))
+    handles: List[str] = []
+    for entry in info.get("chunk_handles", []) or []:
+        if isinstance(entry, dict):
+            uri = entry.get("uri") or entry.get("path") or entry.get("rel_path") or entry.get("abs_path")
+            handles.append(str(uri) if uri else "")
+        else:
+            handles.append(str(entry))
     roots_inline = list(info.get("chunk_roots_hex", []))
     roots: List[str]
     if manifest:
@@ -267,7 +277,10 @@ def run_capsule_sampling(path: Path, capsule: dict, seed: int, extra: int) -> No
 
     for idx in samples:
         handle = chunk_handles[idx]
-        chunk_path = archive_root / handle
+        try:
+            chunk_path = safe_join(archive_root, handle)
+        except ValueError as e:
+            raise SystemExit(f"chunk {idx} has unsafe path: {e}")
         if not chunk_path.exists():
             raise SystemExit(f"chunk {idx} missing: {chunk_path}")
         values = [int(v) for v in json.loads(chunk_path.read_text())]

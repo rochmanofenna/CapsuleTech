@@ -81,6 +81,15 @@ def _copy_events(meta: dict[str, Any], capsule: dict[str, Any], pack_dir: Path) 
         shutil.copy2(events_path, dest)
 
 
+def _copy_da_challenge(meta: dict[str, Any], pack_dir: Path) -> None:
+    challenge_path = Path(meta.get("da_challenge_path", ""))
+    if not challenge_path.exists():
+        return
+    dest = pack_dir / "da" / challenge_path.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(challenge_path, dest)
+
+
 def _copy_row_archive(capsule: dict[str, Any], base: Path, pack_dir: Path) -> None:
     info = capsule.get("row_archive") or {}
     src = info.get("abs_path") or info.get("path")
@@ -133,9 +142,15 @@ def create_capsulepack(run_meta_path: Path, *, pack_name: str | None = None) -> 
     pipeline_dir = Path(run_meta.get("pipeline_output", run_dir / "pipeline"))
     capsule_path = Path(run_meta.get("capsule_path", pipeline_dir / "strategy_capsule.json"))
     capsule = _copy_capsule(capsule_path, pack_dir)
+    profile = (capsule.get("verification_profile") or "PROOF_ONLY").upper()
+    if profile in {"FULL", "FULLY_VERIFIED"} and not capsule.get("da_challenge"):
+        raise ValueError(
+            "capsule declares verification_profile=FULL but no DA challenge is embedded"
+        )
     _copy_policy(run_meta, pack_dir)
     _copy_manifests(run_meta, pack_dir)
     _copy_events(run_meta, capsule, pack_dir)
+    _copy_da_challenge(run_meta, pack_dir)
     _copy_row_archive(capsule, pipeline_dir, pack_dir)
     _copy_proofs(capsule, pipeline_dir, pack_dir)
     write_pack_meta(pack_dir)

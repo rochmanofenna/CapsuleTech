@@ -107,10 +107,11 @@ def available_row_backends() -> List[str]:
 class STCRowBackend(RowBackend):
     name = "geom_stc_fri"
 
-    def __init__(self, row_width: int, archive_dir: str | Path | None = None, chunk_tree_arity: int | None = None):
+    def __init__(self, row_width: int, archive_dir: str | Path | None = None, chunk_tree_arity: int | None = None, use_gpu: bool = False):
         self.row_width = row_width
         self.archive_dir = Path(archive_dir).resolve() if archive_dir is not None else None
         self.chunk_tree_arity = chunk_tree_arity
+        self.use_gpu = use_gpu
 
     def commit_rows(self, rows: List[FieldRow]) -> RowCommitment:
         flat: List[int] = []
@@ -121,6 +122,7 @@ class STCRowBackend(RowBackend):
         vc = STCVectorCommitment(
             chunk_len=self.row_width,
             archive_dir=self.archive_dir,
+            use_gpu=self.use_gpu,
         )
         if self.chunk_tree_arity is not None:
             vc.chunk_tree_arity = self.chunk_tree_arity
@@ -199,6 +201,182 @@ class STCRowBackend(RowBackend):
     def streaming_finalize(self, state: Dict[str, Any]) -> RowCommitment:
         rows = state.get("rows", [])
         return self.commit_rows(rows)
+
+
+try:
+    from bef_zk import bef_rust
+except ImportError:
+    bef_rust = None
+
+###############################################################################
+# Rust STC streaming backend
+
+
+@register_backend
+class RustSTCRowBackend(RowBackend):
+    name = "geom_stc_rust"
+
+    def __init__(self, row_width: int, archive_dir: str | Path | None = None, chunk_tree_arity: int | None = None, **kwargs: Any):
+        if bef_rust is None:
+            raise RuntimeError("bef_rust extension not available")
+        self.row_width = row_width
+        self.archive_dir = Path(archive_dir).resolve() if archive_dir is not None else None
+        self.chunk_tree_arity = chunk_tree_arity
+        # We ignore use_gpu for now in Rust backend commit phase (Rust itself is fast)
+
+    def commit_rows(self, rows: List[FieldRow]) -> RowCommitment:
+        from bef_zk.stc.aok_cpu import ROOT_SEED, derive_challenges, hash_root_update
+        from bef_zk.stc.vc import STCVectorCommitment, VCCommitment, STCCommitment
+        from bef_zk.stc.archive import ChunkArchive
+        
+        # 1. Setup Parameters
+        num_challenges = 2
+        challenges = derive_challenges(ROOT_SEED, num_challenges)
+        params = bef_rust.PyStcParams(challenges, self.row_width)
+        
+        # 2. Prepare Data
+        flat_values = []
+        for row in rows:
+            flat_values.extend([int(x) for x in row])
+            
+        archive = ChunkArchive(root_dir=self.archive_dir)
+        archive_dir_str = str(archive.root)
+        archive.root.mkdir(parents=True, exist_ok=True)
+
+        # 3. Call Rust Optimized Batch Commit
+        result = bef_rust.commit_trace_batch(params, flat_values, self.row_width, archive_dir_str)
+        
+        # 4. Extract Results
+        s_vals = [self._parse_fp_hex(x) for x in result.s_hex]
+        pow_vals = [self._parse_fp_hex(x) for x in result.pow_hex]
+        chunk_roots_list = [bytes.fromhex(c.root) for c in result.chunks]
+        
+        # 5. Build Python-compatible Commitment Metadata
+        # We standardise on tree_arity=2 because that is what our Rust backend computes.
+        tree_arity = 2
+        
+        # Recompute chain_root in Python (Poseidon) for compatibility
+        chain_root = ROOT_SEED
+        current_len = 0
+        for r in chunk_roots_list:
+            chain_root = hash_root_update(chain_root, current_len, r)
+            current_len += self.row_width
+            
+        # The Rust result.global_root is a binary tree root.
+        root_hex = result.global_root
+
+        stc_commit = STCCommitment(
+            length=len(rows) * self.row_width,
+            chunk_len=self.row_width,
+            num_chunks=len(rows),
+            global_root=bytes.fromhex(root_hex),
+            chunk_roots=chunk_roots_list,
+            chain_root=chain_root,
+            challenges=challenges,
+            sketches=s_vals,
+            powers=pow_vals,
+            chunk_tree_arity=tree_arity
+        )
+        
+        # 6. Populate Prover Store
+        from bef_zk.stc.aok_cpu import ChunkRecord
+        records_obj = [
+            ChunkRecord(
+                offset=r.offset,
+                length=self.row_width,
+                values=[], 
+                root=bytes.fromhex(r.root),
+                archive_handle=r.archive_handle
+            ) for r in result.chunks
+        ]
+            
+        vc = STCVectorCommitment(
+            chunk_len=self.row_width,
+            num_challenges=len(challenges),
+            archive_dir=self.archive_dir
+        )
+        vc._store[stc_commit.global_root] = {
+            "commit": stc_commit,
+            "chunks": records_obj,
+            "archive": archive,
+            "archive_root": str(archive.root),
+            "debug_chunk_hist": {}
+        }
+        
+        commit_params = {
+            "root": root_hex,
+            "length": stc_commit.length,
+            "chunk_len": stc_commit.chunk_len,
+            "num_chunks": stc_commit.num_chunks,
+            "chain_root": chain_root.hex(),
+            "challenges": challenges,
+            "sketches": s_vals,
+            "powers": pow_vals,
+            "archive_root": str(archive.root),
+            "chunk_handles": [r.archive_handle for r in records_obj],
+            "chunk_tree_arity": stc_commit.chunk_tree_arity,
+            "chunk_roots_hex": [r.root.hex() for r in records_obj],
+        }
+        
+        # 7. Wrap for Interface
+        vc_commitment_wrapper = VCCommitment(
+            root=stc_commit.global_root,
+            length=stc_commit.length,
+            chunk_len=stc_commit.chunk_len,
+            num_chunks=stc_commit.num_chunks,
+            challenges=stc_commit.challenges,
+            sketches=stc_commit.sketches,
+            powers=stc_commit.powers,
+            chain_root=stc_commit.chain_root,
+            chunk_tree_arity=stc_commit.chunk_tree_arity
+        )
+
+        return RowCommitment(
+            backend=self.name,
+            row_width=self.row_width,
+            params=commit_params,
+            prover_state={"vc": vc, "commitment": vc_commitment_wrapper}, 
+        )
+
+    def _parse_fp_hex(self, s: str) -> int:
+        # Handles Rust debug format like "0x123..."
+        clean = s.strip().lower()
+        if "0x" in clean:
+            clean = clean.split("0x")[1]
+        if not clean:
+            return 0
+        return int(clean, 16)
+
+    def open_row(self, commitment: RowCommitment, idx: int) -> tuple[FieldRow, Dict[str, Any]]:
+        # Delegate to Python impl for opening since the archive format is shared
+        delegate = STCRowBackend(self.row_width, self.archive_dir, self.chunk_tree_arity)
+        return delegate.open_row(commitment, idx)
+
+    def verify_leaf(
+        self,
+        commitment: RowCommitment,
+        idx: int,
+        row_values: FieldRow,
+        proof: Dict[str, Any],
+    ) -> bool:
+        delegate = STCRowBackend(self.row_width, self.archive_dir, self.chunk_tree_arity)
+        return delegate.verify_leaf(commitment, idx, row_values, proof)
+
+    def streaming_init(self) -> Dict[str, Any]:
+        # TODO: Use Rust state for streaming
+        delegate = STCRowBackend(self.row_width, self.archive_dir, self.chunk_tree_arity)
+        return delegate.streaming_init()
+
+    def streaming_append(self, state: Dict[str, Any], row: FieldRow) -> None:
+        # TODO: Use Rust update
+        delegate = STCRowBackend(self.row_width, self.archive_dir, self.chunk_tree_arity)
+        delegate.streaming_append(state, row)
+
+    def streaming_finalize(self, state: Dict[str, Any]) -> RowCommitment:
+        delegate = STCRowBackend(self.row_width, self.archive_dir, self.chunk_tree_arity)
+        commitment = delegate.streaming_finalize(state)
+        commitment.backend = self.name
+        return commitment
 
 
 ###############################################################################

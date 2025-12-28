@@ -8,7 +8,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from bef_zk.adapter import ProofArtifacts, TraceAdapter, TraceArtifacts, TraceCommitment
 from bef_zk.air.geom_air import GeomAIRParams, GeomInitialState, simulate_trace, trace_to_eval_table
@@ -124,6 +124,7 @@ def _compute_file_hash(path: Path) -> str:
 
 class GeomTraceAdapter(TraceAdapter):
     name = "geom"
+    PROGRAM = GEOM_PROGRAM
 
     @classmethod
     def add_arguments(cls, parser: Any) -> None:
@@ -145,6 +146,16 @@ class GeomTraceAdapter(TraceAdapter):
             "--run-nova",
             action="store_true",
             help="enable Nova recursion step (disabled by default)",
+        )
+        parser.add_argument(
+            "--rust-stc",
+            action="store_true",
+            help="use experimental Rust STC backend",
+        )
+        parser.add_argument(
+            "--gpu-da",
+            action="store_true",
+            help="use GPU acceleration for DA sketches",
         )
 
     def simulate_trace(self, args: Any) -> TraceArtifacts:
@@ -210,10 +221,12 @@ class GeomTraceAdapter(TraceAdapter):
         ctx: GeomContext = artifacts.context
         prepared = self._prepare_trace_state(ctx)
         row_matrix = prepared["row_matrix"]
+        backend_name = "geom_stc_rust" if getattr(self.args, "rust_stc", False) else "geom_stc_fri"
         row_backend = get_row_backend(
-            "geom_stc_fri",
+            backend_name,
             row_width=ctx.row_width,
             archive_dir=str(row_archive_dir),
+            use_gpu=getattr(self.args, "gpu_da", False),
         )
         commit_start = time.perf_counter()
         row_commitment = row_backend.commit_rows(row_matrix)
@@ -252,6 +265,7 @@ class GeomTraceAdapter(TraceAdapter):
         commitment: TraceCommitment,
         *,
         statement_hash: bytes,
+        binding_hash: Optional[bytes] = None,
         encoding_id: str,
         trace_path: Path,
     ) -> ProofArtifacts:
@@ -262,10 +276,11 @@ class GeomTraceAdapter(TraceAdapter):
             raise RuntimeError("trace commitment missing row commitment")
         vc = STCVectorCommitment(chunk_len=ctx.row_width)
         profile_data = dict(commitment.profile_data)
+        binding_material = binding_hash or statement_hash
         transcript = Transcript("geom_zk_v1")
         transcript.absorb_bytes(prepared["alpha_digest"])
         transcript.absorb_bytes(bytes.fromhex(row_commitment.params.get("root", "")))
-        transcript.absorb_bytes(statement_hash)
+        transcript.absorb_bytes(binding_material)
         mask_digest = transcript.challenge_bytes()
         mask_vec = derive_mask_vector(mask_digest, ctx.fri_cfg.domain_size)
         composition = prepared["composition"]
@@ -319,7 +334,14 @@ class GeomTraceAdapter(TraceAdapter):
             extra=extra,
         )
 
-    def verify(self, proof_json: str, statement_hash: bytes, artifacts: TraceArtifacts):
+    def verify(
+        self,
+        proof_json: str,
+        statement_hash: bytes,
+        artifacts: TraceArtifacts,
+        *,
+        binding_hash: Optional[bytes] = None,
+    ):
         ctx: GeomContext = artifacts.context
         start = time.perf_counter()
         ok, verify_stats = zk_verify_geom(
@@ -328,7 +350,7 @@ class GeomTraceAdapter(TraceAdapter):
             ctx.init,
             STCVectorCommitment(chunk_len=ctx.row_width),
             proof_from_json(proof_json),
-            statement_hash=statement_hash,
+            statement_hash=binding_hash or statement_hash,
         )
         elapsed = time.perf_counter() - start
         return ok, verify_stats, elapsed

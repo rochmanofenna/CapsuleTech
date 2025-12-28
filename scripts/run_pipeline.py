@@ -13,6 +13,8 @@ import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib import error as url_error
+from urllib import request as url_request
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -20,6 +22,27 @@ if str(ROOT) not in sys.path:
 
 from backends import ADAPTERS
 from bef_zk.adapter import TraceAdapter
+from bef_zk.capsule.da import build_da_challenge, hash_da_challenge
+from bef_zk.capsule.header import (
+    build_capsule_header,
+    compute_header_commit_hash,
+    compute_header_hash,
+    hash_air_params,
+    hash_chunk_handles,
+    hash_chunk_meta,
+    hash_da_policy,
+    hash_fri_config,
+    hash_manifest_descriptor,
+    hash_params,
+    hash_program_descriptor,
+    hash_proof_system,
+    hash_row_index_ref,
+    hash_capsule_identity,
+    hash_instance_binding,
+    sanitize_da_policy,
+    sanitize_row_index_ref,
+)
+from bef_zk.capsule.payload import compute_payload_hash
 from bef_zk.codec import ENCODING_ID, canonical_encode, compute_capsule_hash
 from bef_zk.spec import StatementV1, compute_statement_hash
 from capsule_bench.events import EventLogger, ProgressSink
@@ -79,6 +102,182 @@ def required_samples(delta: float, epsilon: float) -> int:
     return max(1, math.ceil(math.log(1.0 / epsilon) / delta))
 
 
+def _posix_rel(path: Path, base: Path) -> str:
+    rel = _relpath(path, base)
+    return rel.replace(os.sep, "/")
+
+
+def _build_chunk_manifest(handles: list[Any], row_archive_dir: Path) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for idx, handle in enumerate(handles):
+        uri = str(handle)
+        handle_path = Path(uri)
+        if not handle_path.is_absolute():
+            handle_path = (row_archive_dir / uri).resolve()
+        rel_uri = _posix_rel(handle_path, row_archive_dir) if handle_path.exists() else uri
+        size = handle_path.stat().st_size if handle_path.exists() else 0
+        sha = _compute_file_hash(handle_path) if handle_path.exists() else ""
+        entries.append(
+            {
+                "id": idx,
+                "uri": rel_uri,
+                "sha256": sha,
+                "size": size,
+                "content_type": "application/octet-stream",
+            }
+        )
+    return entries
+
+
+def _write_chunk_manifest(entries: list[dict[str, Any]], directory: Path) -> Path:
+    manifest_path = directory / "chunk_manifest.json"
+    payload = {"schema": "chunk_manifest_v1", "chunks": entries}
+    manifest_path.write_text(json.dumps(payload, indent=2))
+    return manifest_path
+
+
+def _relay_request_json(
+    base_url: str,
+    endpoint: str,
+    payload: dict[str, Any],
+    token: str | None,
+    timeout: float,
+) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}{endpoint}"
+    data = json.dumps(payload).encode("utf-8")
+    req = url_request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with url_request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+    except url_error.HTTPError as exc:  # pragma: no cover - network dependent
+        detail = exc.read().decode("utf-8", "ignore") if hasattr(exc, "read") else exc.reason
+        raise RuntimeError(
+            f"relay request failed ({exc.code}): {detail or exc.reason}"
+        ) from exc
+    except url_error.URLError as exc:  # pragma: no cover - network dependent
+        raise RuntimeError(f"relay request failed: {exc.reason}") from exc
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:  # pragma: no cover - relay failure
+        raise RuntimeError("relay returned invalid JSON") from exc
+
+
+def _fetch_da_challenge_from_relay(
+    *,
+    relay_base: str,
+    token: str | None,
+    timeout: float,
+    capsule_commit_hash: str,
+    payload_hash: str,
+    chunk_manifest_hash: str,
+    chunk_meta: dict[str, Any],
+) -> dict[str, Any]:
+    commit_payload = {
+        "capsule_commit_hash": capsule_commit_hash,
+        "payload_hash": payload_hash,
+        "chunk_handles_root": chunk_manifest_hash,
+        "num_chunks": int(chunk_meta.get("num_chunks") or 0),
+    }
+    _relay_request_json(relay_base, "/v1/da/commit", commit_payload, token, timeout)
+    response = _relay_request_json(
+        relay_base,
+        "/v1/da/challenge",
+        {"capsule_commit_hash": capsule_commit_hash},
+        token,
+        timeout,
+    )
+    challenge = response.get("challenge")
+    if not isinstance(challenge, dict):
+        raise RuntimeError("relay DA challenge missing from response")
+    return challenge
+
+
+def _build_proof_system_meta(
+    adapter: TraceAdapter,
+    *,
+    row_commitment: Any,
+    trace_artifacts: TraceArtifacts,
+    air_params_hash: str | None,
+    fri_params_hash: str | None,
+    program_hash: str | None,
+) -> dict[str, Any]:
+    backend_id = getattr(row_commitment, "backend", adapter.name)
+    meta: dict[str, Any] = {
+        "scheme_id": adapter.name,
+        "backend_id": backend_id,
+        "circuit_id": trace_artifacts.trace_spec.trace_format_id,
+        "hash_fn_id": "sha256",
+    }
+    if air_params_hash:
+        meta["air_params_hash"] = air_params_hash
+    if fri_params_hash:
+        meta["fri_params_hash"] = fri_params_hash
+    if program_hash:
+        meta["program_hash"] = program_hash
+    vk_payload = {
+        "schema": "capsule_vk_v1",
+        "scheme_id": adapter.name,
+        "backend_id": backend_id,
+        "circuit_id": trace_artifacts.trace_spec.trace_format_id,
+        "air_params_hash": air_params_hash,
+        "fri_params_hash": fri_params_hash,
+        "program_hash": program_hash,
+    }
+    meta["vk_hash"] = hash_proof_system(vk_payload)
+    meta["hash"] = hash_proof_system({k: v for k, v in meta.items() if k != "hash"})
+    return meta
+
+
+def _load_da_challenge(
+    *,
+    args: argparse.Namespace,
+    header_commit_hash: str,
+    payload_hash: str,
+    chunk_manifest_hash: str,
+    chunk_meta: dict[str, Any],
+    da_enabled: bool,
+    out_dir: Path,
+) -> tuple[dict[str, Any] | None, Path | None]:
+    if not da_enabled:
+        return None, None
+    challenge: dict[str, Any] | None = None
+    challenge_path: Path | None = None
+    if args.da_challenge_file:
+        src_path = args.da_challenge_file.expanduser().resolve()
+        challenge = json.loads(src_path.read_text())
+        challenge_path = out_dir / "da_challenge.json"
+        shutil.copy2(src_path, challenge_path)
+    elif args.da_relay_url:
+        timeout = max(float(getattr(args, "da_relay_timeout", 15.0) or 15.0), 1.0)
+        challenge = _fetch_da_challenge_from_relay(
+            relay_base=args.da_relay_url,
+            token=getattr(args, "da_relay_token", None),
+            timeout=timeout,
+            capsule_commit_hash=header_commit_hash,
+            payload_hash=payload_hash,
+            chunk_manifest_hash=chunk_manifest_hash,
+            chunk_meta=chunk_meta,
+        )
+        challenge_path = out_dir / "da_challenge.json"
+        challenge_path.write_text(json.dumps(challenge, indent=2))
+    elif args.allow_insecure_da_challenge:
+        profile = (args.verification_profile or "full").lower()
+        if profile == "full":
+            raise ValueError("verification_profile=full requires a relay-issued DA challenge")
+        challenge = build_da_challenge(capsule_commit_hash=header_commit_hash)
+        challenge_path = out_dir / "da_challenge.json"
+        challenge_path.write_text(json.dumps(challenge, indent=2))
+    if challenge is None:
+        return None, None
+    commit_ref = challenge.get("capsule_commit_hash") or challenge.get("capsule_hash")
+    if commit_ref and commit_ref.lower() != header_commit_hash.lower():
+        raise ValueError("DA challenge does not match capsule commit hash")
+    return challenge, challenge_path
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the adapter-driven BEF pipeline", conflict_handler="resolve")
     parser.add_argument("--backend", type=str, default="geom", help="trace adapter id")
@@ -102,6 +301,26 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--da-k-samples", type=int)
     parser.add_argument("--da-provider-timeout-ms", type=int, default=5000)
     parser.add_argument("--da-provider-retry-count", type=int, default=2)
+    parser.add_argument("--da-challenge-file", type=Path, help="path to a relay-issued DA challenge JSON")
+    parser.add_argument("--da-relay-url", type=str, help="base URL for the DA relay commit/challenge API")
+    parser.add_argument("--da-relay-token", type=str, help="bearer token used to authenticate with the DA relay")
+    parser.add_argument(
+        "--da-relay-timeout",
+        type=float,
+        default=15.0,
+        help="timeout (seconds) for DA relay HTTP requests",
+    )
+    parser.add_argument(
+        "--allow-insecure-da-challenge",
+        action="store_true",
+        help="allow locally generated DA challenge when relay-issued challenge is unavailable",
+    )
+    parser.add_argument(
+        "--verification-profile",
+        choices=["proof_only", "policy_self_reported", "policy_enforced", "full"],
+        default="full",
+        help="declare the verification profile embedded in the capsule header",
+    )
     return parser
 
 
@@ -138,6 +357,7 @@ def main() -> None:
     adapter_cls.add_arguments(parser)
     args = parser.parse_args()
     adapter = adapter_cls(args)
+    verification_profile = (args.verification_profile or "full").upper()
 
     formats = args.artifact_formats
     selected_encoding = args.encoding_id
@@ -240,16 +460,56 @@ def main() -> None:
     )
     statement_hash_hex = compute_statement_hash(statement_obj)
 
+    chunk_handles = trace_commitment.chunk_handles
+    chunk_roots_paths = trace_commitment.chunk_roots_paths
+    chunk_len = row_commitment.row_width
+    num_chunks = len(chunk_handles)
+    chunk_meta = {
+        "num_chunks": num_chunks,
+        "chunk_len": chunk_len,
+        "chunk_size_bytes": chunk_len * 8,
+        "data_length_bytes": chunk_len * num_chunks * 8,
+        "chunking_rule_id": "fixed_range_v1",
+    }
+    params_obj = {"row_width": trace_artifacts.row_width}
+    params_hash = hash_params(params_obj)
+    chunk_meta_hash = hash_chunk_meta(chunk_meta)
+    context = getattr(trace_artifacts, "context", None)
+    air_params_hash = hash_air_params(getattr(context, "params", None))
+    fri_params_hash = hash_fri_config(getattr(context, "fri_cfg", None))
+    program_descriptor = getattr(adapter, "program_descriptor", None) or getattr(adapter_cls, "PROGRAM", None)
+    program_hash = hash_program_descriptor(program_descriptor)
+    proof_system_meta = _build_proof_system_meta(
+        adapter,
+        row_commitment=row_commitment,
+        trace_artifacts=trace_artifacts,
+        air_params_hash=air_params_hash,
+        fri_params_hash=fri_params_hash,
+        program_hash=program_hash,
+    )
+    vk_hash = proof_system_meta.get("vk_hash") or proof_system_meta.get("hash")
+    instance_hash = hash_instance_binding(
+        statement_hash=statement_hash_hex,
+        row_root=row_commitment.params.get("root", ""),
+        trace_spec_hash=trace_artifacts.trace_spec_hash,
+        vk_hash=vk_hash,
+        params_hash=params_hash,
+        chunk_meta_hash=chunk_meta_hash,
+        row_tree_arity=row_commitment.params.get("chunk_tree_arity"),
+        air_params_hash=air_params_hash,
+        fri_params_hash=fri_params_hash,
+        program_hash=program_hash,
+    )
+    proof_system_meta["instance_hash"] = instance_hash
+
     proof_artifacts = adapter.generate_proof(
         trace_artifacts,
         trace_commitment,
         statement_hash=bytes.fromhex(statement_hash_hex),
+        binding_hash=bytes.fromhex(instance_hash),
         encoding_id=selected_encoding,
         trace_path=trace_path,
     )
-
-    chunk_handles = trace_commitment.chunk_handles
-    chunk_roots_paths = trace_commitment.chunk_roots_paths
     register_path(chunk_roots_paths.get("json"), "hex_json_v1")
     register_path(chunk_roots_paths.get("bin"), "raw32_v1")
     row_archive_artifact = {
@@ -265,7 +525,11 @@ def main() -> None:
     }
     row_archive_artifact["chunk_roots_rel_path"] = row_archive_artifact["chunk_roots_path"]
     row_archive_artifact["chunk_roots_bin_rel_path"] = row_archive_artifact["chunk_roots_bin_path"]
-    row_archive_artifact["chunk_handles"] = chunk_handles
+    chunk_manifest_entries = _build_chunk_manifest(chunk_handles, row_archive_dir)
+    row_archive_artifact["chunk_handles"] = chunk_manifest_entries
+    chunk_manifest_path = _write_chunk_manifest(chunk_manifest_entries, row_archive_dir)
+    row_archive_artifact["chunk_manifest_path"] = _posix_rel(chunk_manifest_path, out_dir)
+    register_path(chunk_manifest_path, "json_hex_v1")
 
     default_k = required_samples(0.1, 1e-6)
     da_policy = {
@@ -280,15 +544,6 @@ def main() -> None:
         },
     }
 
-    chunk_len = row_commitment.row_width
-    num_chunks = len(chunk_handles)
-    chunk_meta = {
-        "num_chunks": num_chunks,
-        "chunk_len": chunk_len,
-        "chunk_size_bytes": chunk_len * 8,
-        "data_length_bytes": chunk_len * num_chunks * 8,
-        "chunking_rule_id": "fixed_range_v1",
-    }
     row_index_ref = {
         "commitment_type": "merkle_root",
         "commitment": row_commitment.params.get("root"),
@@ -345,14 +600,18 @@ def main() -> None:
         proof_json,
         bytes.fromhex(statement_hash_hex),
         trace_artifacts,
+        binding_hash=bytes.fromhex(instance_hash),
     )
     if not verify_ok:
         raise RuntimeError("adapter verification failed")
 
-    chunk_leaf_enabled = any(
-        bool(batch.proof.chunk_leaf_proofs)
-        for batch in proof_artifacts.proof_obj.fri_proof.batches
-    )
+    # Check for chunk_leaf_multiproof (Geom-specific feature)
+    chunk_leaf_enabled = False
+    if hasattr(proof_artifacts.proof_obj, "fri_proof"):
+        chunk_leaf_enabled = any(
+            bool(batch.proof.chunk_leaf_proofs)
+            for batch in proof_artifacts.proof_obj.fri_proof.batches
+        )
     manifest["chunk_roots"] = {
         "default": "json",
         "formats": {
@@ -407,7 +666,18 @@ def main() -> None:
         "features": {"chunk_leaf_multiproof": chunk_leaf_enabled},
     }
 
+    manifest_path = out_dir / "artifact_manifest.json"
+    register_path(manifest_path, "json_manifest_v1")
+    manifest["capsule"] = {
+        "default_format": "json" if want_json else "bin",
+        "formats": capsule_manifest_formats,
+    }
+    manifest_hash = hash_manifest_descriptor(manifest)
+
     extra_proofs = proof_artifacts.extra or {}
+
+    # DA challenge may be populated later; initialize path to avoid UnboundLocal
+    da_challenge_path = None
 
     capsule_artifacts: dict[str, object] = {
         "trace": _portable_entry(trace_path, rel_path=f"artifacts/{trace_path.name}"),
@@ -419,40 +689,68 @@ def main() -> None:
             events_log_path,
             rel_path=f"events/{events_log_path.name}",
         )
+    if da_challenge_path:
+        capsule_artifacts["da_challenge"] = _portable_entry(
+            da_challenge_path,
+            rel_path=f"da/{da_challenge_path.name}",
+            base=out_dir,
+        )
 
-    capsule = {
+    events_log_hash = None
+    events_log_len = None
+    if events_log_path and events_log_path.exists():
+        events_log_hash = f"sha256:{_compute_file_hash(events_log_path)}"
+        events_log_len = events_log_path.stat().st_size
+        anchor_meta["events_log_hash"] = events_log_hash
+        anchor_meta["events_log_len"] = events_log_len
+
+    policy_ref = {
+        "policy_id": args.policy_id,
+        "policy_version": args.policy_version,
+        "policy_hash": policy_digest,
+        "track_id": args.track_id,
+    }
+    policy_section = dict(policy_ref)
+    policy_section["policy_path"] = str(policy_path)
+    sanitized_row_index_ref = sanitize_row_index_ref(row_index_ref)
+    row_index_ref_hash = hash_row_index_ref(sanitized_row_index_ref)
+    sanitized_da_policy = sanitize_da_policy(da_policy)
+    da_policy_hash = hash_da_policy(sanitized_da_policy)
+    chunk_manifest_hash = hash_chunk_handles(chunk_manifest_entries)
+
+    # Get row_openings count (Geom-specific, 0 for succinct backends like RISC0)
+    row_openings_count = 0
+    if hasattr(proof_artifacts.proof_obj, "row_openings"):
+        row_openings_count = len(proof_artifacts.proof_obj.row_openings)
+
+    proofs_section = {
+        "primary": {
+            "path": str(primary_proof_path),
+            "rel_path": primary_proof_rel,
+            "size_bytes": primary_size,
+            "row_openings": row_openings_count,
+            "row_backend": row_commitment.backend,
+            "row_archive": row_archive_artifact,
+            "formats": geom_formats,
+        }
+    }
+
+    capsule_payload: dict[str, Any] = {
         "schema": "bef_capsule_v1",
         "vm_id": args.backend,
         "trace_id": args.trace_id,
         "prev_capsule_hash": args.prev_capsule_hash,
         "trace_spec": trace_artifacts.trace_spec.to_obj(),
         "trace_spec_hash": trace_artifacts.trace_spec_hash,
-        "policy": {
-            "policy_id": args.policy_id,
-            "policy_version": args.policy_version,
-            "policy_path": str(policy_path),
-            "policy_hash": policy_digest,
-            "track_id": args.track_id,
-        },
-        "params": {
-            "row_width": trace_artifacts.row_width,
-        },
+        "policy": policy_section,
+        "params": params_obj,
         "da_policy": da_policy,
         "chunk_meta": chunk_meta,
         "row_index_ref": row_index_ref,
         "hashing": hashing_meta,
+        "proof_system": proof_system_meta,
         "anchor": anchor_meta,
-        "proofs": {
-            "primary": {
-                "path": str(primary_proof_path),
-                "rel_path": primary_proof_rel,
-                "size_bytes": primary_size,
-                "row_openings": len(proof_artifacts.proof_obj.row_openings),
-                "row_backend": row_commitment.backend,
-                "row_archive": row_archive_artifact,
-                "formats": geom_formats,
-            }
-        },
+        "proofs": proofs_section,
         "row_archive": row_archive_artifact,
         "artifacts": capsule_artifacts,
     }
@@ -462,22 +760,80 @@ def main() -> None:
             "recursive_proof_bytes": extra_proofs["nova"].get("recursive_proof_bytes"),
             "compressed": extra_proofs["nova"].get("compressed"),
         }
-        capsule["proofs"]["nova"] = nova_info
+        capsule_payload["proofs"]["nova"] = nova_info
         stats_path = extra_proofs["nova"].get("stats_path")
         if stats_path:
             path_obj = Path(stats_path)
             register_path(path_obj, "json_hex_v1")
-            capsule["artifacts"]["nova_stats"] = _portable_entry(
+            capsule_payload["artifacts"]["nova_stats"] = _portable_entry(
                 path_obj,
                 rel_path=f"proofs/nova/{path_obj.name}",
             )
 
-    capsule["statement"] = statement_obj.to_obj()
-    capsule["statement_hash"] = statement_hash_hex
+    capsule_payload.setdefault("artifacts", {})["manifest"] = _portable_entry(
+        manifest_path,
+        rel_path="manifests/artifact_manifest.json",
+    )
 
-    capsule_for_hash = deepcopy(capsule)
-    capsule_hash = compute_capsule_hash(capsule_for_hash, encoding_id=selected_encoding)
+    capsule_payload["statement"] = statement_obj.to_obj()
+    capsule_payload["statement_hash"] = statement_hash_hex
+    capsule_payload["verification_profile"] = verification_profile
+
+    payload_hash = compute_payload_hash(capsule_payload, encoding_id=selected_encoding)
+
+    capsule_header = build_capsule_header(
+        vm_id=args.backend,
+        backend_id=row_commitment.backend,
+        circuit_id=trace_artifacts.trace_spec.trace_format_id,
+        trace_id=args.trace_id,
+        prev_capsule_hash=args.prev_capsule_hash,
+        trace_spec_hash=trace_artifacts.trace_spec_hash,
+        statement_hash=statement_hash_hex,
+        params_hash=params_hash,
+        row_root=row_commitment.params.get("root", ""),
+        row_tree_arity=row_commitment.params.get("chunk_tree_arity"),
+        row_index_ref_hash=row_index_ref_hash,
+        chunk_meta_hash=chunk_meta_hash,
+        chunk_handles_root=chunk_manifest_hash,
+        policy_ref=policy_ref,
+        da_policy_hash=da_policy_hash,
+        anchor=anchor_meta,
+        proof_system=proof_system_meta,
+        chunk_manifest_hash=chunk_manifest_hash,
+        manifest_hash=manifest_hash,
+        air_params_hash=air_params_hash,
+        fri_params_hash=fri_params_hash,
+        program_hash=program_hash,
+        payload_hash=payload_hash,
+        verification_profile=verification_profile,
+    )
+
+    da_enabled = bool(sanitized_da_policy)
+    header_commit_hash = compute_header_commit_hash(capsule_header)
+    da_challenge, da_challenge_path = _load_da_challenge(
+        args=args,
+        header_commit_hash=header_commit_hash,
+        payload_hash=payload_hash,
+        chunk_manifest_hash=chunk_manifest_hash,
+        chunk_meta=chunk_meta,
+        da_enabled=da_enabled,
+        out_dir=out_dir,
+    )
+    if da_challenge:
+        capsule_header["da_ref"]["challenge_hash"] = hash_da_challenge(da_challenge)
+    header_hash = compute_header_hash(capsule_header)
+
+    capsule = dict(capsule_payload)
+    capsule["payload_hash"] = payload_hash
+    capsule["header"] = capsule_header
+    capsule["header_hash"] = header_hash
+    capsule["header_commit_hash"] = header_commit_hash
+    capsule_hash = hash_capsule_identity(header_commit_hash, payload_hash)
     capsule["capsule_hash"] = capsule_hash
+
+    if da_challenge:
+        capsule["da_challenge"] = da_challenge
+
     if private_key_bytes:
         if len(private_key_bytes) != 32:
             raise ValueError("secp256k1 private key must be 32 bytes")
@@ -503,16 +859,6 @@ def main() -> None:
         },
     )
 
-    manifest_path = out_dir / "artifact_manifest.json"
-    register_path(manifest_path, "json_manifest_v1")
-    manifest["capsule"] = {
-        "default_format": "json" if want_json else "bin",
-        "formats": capsule_manifest_formats,
-    }
-    capsule.setdefault("artifacts", {})["manifest"] = _portable_entry(
-        manifest_path,
-        rel_path="manifests/artifact_manifest.json",
-    )
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
     stats_path = args.stats_out or (out_dir / "pipeline_stats.json")
