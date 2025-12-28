@@ -65,6 +65,24 @@ PYTHONPATH=. .venv/bin/python scripts/verify_capsule.py out/geom_demo/strategy_c
   - Success: proof stats, DA audit flag, etc.
   - Failure: `{"status": "REJECT", "error_code": "E0xx"}`
 
+### Hermetic verification (.cap)
+
+Use the Capsule CLI to package a run into a portable receipt and verify anywhere:
+
+```
+# Package a run into a .cap archive
+capsule emit \
+  --capsule out/capsule_runs/<run_id>/pipeline/strategy_capsule.json \
+  --artifacts out/capsule_runs/<run_id>/pipeline \
+  --policy out/capsule_runs/<run_id>/policy.json \
+  --out /tmp/receipt.cap
+
+# Verify hermetically (safe extraction + sandboxed materialization)
+capsule verify /tmp/receipt.cap --json
+```
+
+The `.cap` verifier enforces safe extraction (no traversal, no links, size limits), writes artifacts to the rel paths recorded in the capsule, validates sizes/hashes, then runs the canonical verifier. See `docs/guides/cli.md` and `docs/spec/10_cap_format.md`.
+
 ## Tests
 
 ```
@@ -81,7 +99,14 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_capsule_verify.py -k da --max
 - `docs/hssa_da_protocol.md` – DA sampling protocol and guarantees
 - `docs/stc_da_profiles.md` – DA policy profiles
 - `docs/security_model.md` – adversary model, binding points and security claims for Capsules + STC
+- `docs/guides/cli.md` – Capsule CLI (emit/verify/inspect) and `.cap` usage
+- `docs/spec/10_cap_format.md` – portable `.cap` format and hermetic verification
 - `server/README.md` – FastAPI relay for CapsuleBench live event streams
+
+### Backends
+
+- Geom backend: `docs/backends/geom.md`
+- Risc0 backend: `docs/backends/risc0.md`
 
 ## CapsuleBench CLI
 
@@ -159,6 +184,10 @@ Trusted relay/manifest registries also need reproducible hashes. Use
 `scripts/compute_trust_roots.py` to print the SHA-256 root after editing
 `config/trusted_relays.json` or `config/manifest_signers.json`; the verifier’s
 `--trusted-*-root` flags must match these values when you roll keys.
+
+### Data availability (FULL)
+
+For FULL verification, the verifier accepts a signed DA challenge (challenge v1) issued by a trusted challenger key id pinned in `config/trusted_relays.json` (or CLI overrides). The challenge binds `{capsule_commit_hash, seed, k, chunk_len, chunk_tree_arity, issued_at}`; the verifier samples deterministically and checks Merkle openings to `row_root`. See `docs/spec/06_protocol.md` and `docs/spec/05_profiles.md`.
 
 ### Streaming events to the relay
 
