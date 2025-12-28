@@ -1,34 +1,7 @@
 #![allow(clippy::needless_borrow)]
 
-mod stc;
-
-use std::collections::HashMap;
-use std::fs::File;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use bincode::Options;
-use clap::{Args, Parser, Subcommand};
-use color_eyre::eyre::{ensure, eyre, Result};
-use ff::Field;
-use hex::decode;
-use nova_snark::nova::{CompressedSNARK, PublicParams, RecursiveSNARK};
-use nova_snark::provider::ipa_pc;
-use nova_snark::provider::pasta::pallas;
-use nova_snark::provider::{PallasEngine, VestaEngine};
-use nova_snark::spartan::snark::RelaxedR1CSSNARK;
-use nova_snark::traits::snark::default_ck_hint;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-
-use stc::{update_state, StcChunk, StcParams, StcState, StcStepCircuit};
-
-const DEFAULT_BENCH_CHALLENGES: &[usize] = &[2, 4, 8];
-
-type Fp = pallas::Scalar;
+use nova_stc::stc::{update_state, StcChunk, StcParams, StcState, StcStepCircuit};
+use nova_stc::Fp;
 
 type E1 = PallasEngine;
 type E2 = VestaEngine;

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import os
@@ -26,6 +27,12 @@ try:  # Optional dependency for R2 downloads
 except ImportError:  # pragma: no cover - optional
     boto3 = None
 
+try:  # Optional for DA relay signing
+    from coincurve import PrivateKey
+except ImportError:  # pragma: no cover - optional
+    PrivateKey = None
+
+from bef_zk.capsule.da import build_da_challenge, challenge_signature_payload
 from .event_store import EventStore
 try:
     from .event_store_pg import PostgresEventStore
@@ -65,6 +72,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 VERIFICATION_ROOT = Path(os.environ.get("VERIFICATION_ROOT", "server_data/verifications")).resolve()
 VERIFICATION_ROOT.mkdir(parents=True, exist_ok=True)
 _r2_client = None
+CAPSULEPACK_MAX_BYTES = int(os.environ.get("CAPSULEPACK_MAX_BYTES", str(512 * 1024 * 1024)))
+DA_RELAY_ID = os.environ.get("DA_RELAY_ID", "relay_main_v1")
+_DA_RELAY_PRIV_HEX = os.environ.get("DA_CHALLENGE_PRIVATE_KEY")
+_DA_RELAY_KEY = (
+    PrivateKey(bytes.fromhex(_DA_RELAY_PRIV_HEX))
+    if _DA_RELAY_PRIV_HEX and PrivateKey is not None
+    else None
+)
 
 
 @dataclass
@@ -100,8 +115,20 @@ class ArtifactManifest(BaseModel):
     artifacts: List[ArtifactEntry]
 
 
+class DACommitRequest(BaseModel):
+    capsule_commit_hash: str
+    payload_hash: str
+    chunk_handles_root: str | None = None
+    num_chunks: int | None = None
+
+
+class DAChallengeRequest(BaseModel):
+    capsule_commit_hash: str
+
+
 _subscriptions: Dict[str, Set[WebSocket]] = {}
 _sub_lock = asyncio.Lock()
+_DA_COMMITS: Dict[str, dict] = {}
 
 
 async def _issue_ingest_token(run_id: str, ttl: int | None = None) -> IngestToken:
@@ -207,6 +234,40 @@ async def get_events(
         except json.JSONDecodeError:
             continue
     return JSONResponse(payload)
+
+
+@app.post("/v1/da/commit")
+async def register_da_commit(request: DACommitRequest) -> dict:
+    _DA_COMMITS[request.capsule_commit_hash] = {
+        "payload_hash": request.payload_hash,
+        "chunk_handles_root": request.chunk_handles_root,
+        "num_chunks": request.num_chunks,
+        "committed_at": time.time(),
+    }
+    return {"status": "committed"}
+
+
+@app.post("/v1/da/challenge")
+async def issue_da_challenge(request: DAChallengeRequest) -> dict:
+    record = _DA_COMMITS.get(request.capsule_commit_hash)
+    if record is None:
+        raise HTTPException(status_code=404, detail="commit not found")
+    if _DA_RELAY_KEY is None:
+        raise HTTPException(status_code=503, detail="relay signing key unavailable")
+    issued_ms = int(time.time() * 1000)
+    challenge = build_da_challenge(
+        capsule_commit_hash=request.capsule_commit_hash,
+        relay_pubkey_id=DA_RELAY_ID,
+        issued_at_ms=issued_ms,
+        expires_at_ms=issued_ms + 10 * 60 * 1000,
+    )
+    challenge["payload_hash"] = record.get("payload_hash")
+    challenge["chunk_handles_root"] = record.get("chunk_handles_root")
+    challenge["num_chunks"] = record.get("num_chunks")
+    payload_bytes = challenge_signature_payload(challenge)
+    digest = hashlib.sha256(payload_bytes).digest()
+    challenge["relay_signature"] = _DA_RELAY_KEY.sign(digest, hasher=None).hex()
+    return {"challenge": challenge}
 
 
 @app.get("/runs/{run_id}/snapshot")
@@ -378,14 +439,60 @@ def _materialize_artifact(entry: dict) -> tuple[Path, bool]:
     raise RuntimeError("unsupported artifact storage")
 
 
+def _hash_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(1 << 20)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _verify_pack_meta(pack_root: Path) -> None:
+    meta_path = pack_root / "pack_meta.json"
+    if not meta_path.exists():
+        raise RuntimeError("capsulepack missing pack_meta.json")
+    try:
+        meta = json.loads(meta_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("pack_meta.json is not valid JSON") from exc
+    entries = meta.get("entries") or []
+    root_resolved = pack_root.resolve()
+    for entry in entries:
+        rel = entry.get("path")
+        digest = entry.get("sha256")
+        if not rel or not digest:
+            raise RuntimeError("invalid pack_meta entry")
+        target = (pack_root / rel).resolve()
+        if not str(target).startswith(str(root_resolved)):
+            raise RuntimeError("pack_meta entry escapes extraction root")
+        if not target.is_file():
+            raise RuntimeError(f"capsulepack entry missing: {rel}")
+        if _hash_file(target) != digest:
+            raise RuntimeError(f"capsulepack entry hash mismatch: {rel}")
+
+
 def _extract_capsulepack(tar_path: Path) -> Path:
     tmp_dir = tempfile.mkdtemp(prefix="capsulepack_")
     tmp_path = Path(tmp_dir)
+    total_size = 0
     with tarfile.open(tar_path, "r:gz") as archive:
-        archive.extractall(tmp_path)
+        for member in archive.getmembers():
+            member_path = Path(member.name)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise RuntimeError("capsulepack contains unsafe paths")
+            if member.issym() or member.islnk():
+                raise RuntimeError("capsulepack contains symbolic links, which are not allowed")
+            total_size += int(member.size or 0)
+            if total_size > CAPSULEPACK_MAX_BYTES:
+                raise RuntimeError("capsulepack exceeds maximum allowed size")
+            archive.extract(member, tmp_path)
     root = tmp_path / "capsulepack"
     if not root.exists():
         raise RuntimeError("capsulepack root missing after extraction")
+    _verify_pack_meta(root)
     return root
 
 
