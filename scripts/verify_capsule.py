@@ -1479,8 +1479,19 @@ def _verify_capsule_core(
     actual_events_hash: str | None = None
     actual_events_len: int | None = None
     if events_entry:
-        events_path = _resolve(base, events_entry)
-        if events_path.exists():
+        # Prefer sandbox-safe resolution; if not found, allow a strict
+        # fallback to an absolute path recorded in the capsule when
+        # verifying directly in the original run directory.
+        try:
+            events_path = _resolve(base, events_entry)
+        except FileNotFoundError:
+            if isinstance(events_entry, dict):
+                abs_candidate = events_entry.get("path") or events_entry.get("abs_path")
+                if abs_candidate:
+                    p = Path(abs_candidate)
+                    if p.exists():
+                        events_path = p
+        if events_path and events_path.exists():
             actual_events_hash = f"sha256:{_compute_file_hash(events_path)}"
             actual_events_len = events_path.stat().st_size
     chain_head = anchor_meta.get("event_chain_head") or header_anchor.get("event_chain_head")
