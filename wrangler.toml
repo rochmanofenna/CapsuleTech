@@ -3,10 +3,6 @@ pages_build_output_dir = "ui/dist"
 # Use a conservative, widely-supported Workers date to avoid deploy failures.
 compatibility_date = "2024-12-01"
 
-# Allow deploying as a standalone Worker (wrangler deploy)
-# while still supporting Pages (wrangler pages deploy).
-main = "worker/index.js"
-
 [vars]
 RELAY_BASE = "https://capsuletech.onrender.com"
 
