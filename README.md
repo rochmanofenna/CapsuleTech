@@ -1,6 +1,51 @@
-# STC / Geometry Backend
+# CapSeal
 
-Hash-only STC + FRI pipeline for streaming traces, including TraceSpecV1/StatementV1 bindings, policy registry pinning, and a policy-aware DA audit.
+Portable cryptographic receipts for off-chain computation.
+
+A `.cap` receipt cryptographically binds **code + inputs + config + output claim**. Verification fails if any part is modified.
+
+## Quickstart
+
+```bash
+# Run a computation and seal it
+capseal run ./strategy.py
+
+# Verify the receipt (milliseconds)
+capseal verify run.cap
+
+# Inspect what was sealed
+capseal inspect run.cap
+
+# (Optional) Fetch full audit bundle
+capseal audit run.cap --fetch
+```
+
+## Verification Levels
+
+| Level | What's Checked |
+|-------|----------------|
+| **Proof-Only** | Cryptographic binding intact |
+| **Policy-Enforced** | Hardware/toolchain manifests match policy |
+| **Audit-Ready** | Full replay artifacts retrievable on demand |
+
+## What CapSeal Proves
+
+CapSeal proves that **this exact code, inputs, config, and environment produced the claimed output** — not that the code itself is correct.
+
+Tampering or mismatch fails verification.
+
+## Audit Bundles
+
+Audit bundles are:
+- Content-addressed
+- Integrity-checked against receipt commitments
+- Retrievable only if authorized by policy
+
+---
+
+# Backend: `geom_stc_fri` (HSSA-STC v3)
+
+The sections below document the underlying STC + FRI pipeline for streaming traces, including TraceSpecV1/StatementV1 bindings, policy registry pinning, and policy-aware DA audit.
 
 ## Key Features
 
@@ -31,7 +76,7 @@ See `docs/trace_statement_spec.md` for serialization + hashing details.
 
 ## Running the Pipeline
 
-```
+```bash
 PYTHONPATH=. .venv/bin/python scripts/run_pipeline.py --backend geom \
     --steps 4096 --num-challenges 4 --num-queries 32 \
     --output-dir out/geom_demo --trace-id geom_demo \
@@ -53,7 +98,7 @@ Outputs:
 
 ## Verifying a Capsule
 
-```
+```bash
 PYTHONPATH=. .venv/bin/python scripts/verify_capsule.py out/geom_demo/strategy_capsule.json \
     --policy policies/benchmark_policy_v1.json \
     --manifest-root out/capsule_runs/<run_id>/manifests \
@@ -67,25 +112,25 @@ PYTHONPATH=. .venv/bin/python scripts/verify_capsule.py out/geom_demo/strategy_c
 
 ### Hermetic verification (.cap)
 
-Use the Capsule CLI to package a run into a portable receipt and verify anywhere:
+Use the CapSeal CLI to package a run into a portable receipt and verify anywhere:
 
-```
+```bash
 # Package a run into a .cap archive
-capsule emit \
+capseal emit \
   --capsule out/capsule_runs/<run_id>/pipeline/strategy_capsule.json \
   --artifacts out/capsule_runs/<run_id>/pipeline \
   --policy out/capsule_runs/<run_id>/policy.json \
   --out /tmp/receipt.cap
 
 # Verify hermetically (safe extraction + sandboxed materialization)
-capsule verify /tmp/receipt.cap --json
+capseal verify /tmp/receipt.cap --json
 ```
 
 The `.cap` verifier enforces safe extraction (no traversal, no links, size limits), writes artifacts to the rel paths recorded in the capsule, validates sizes/hashes, then runs the canonical verifier. See `docs/guides/cli.md` and `docs/spec/10_cap_format.md`.
 
 ## Tests
 
-```
+```bash
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_da_provider.py
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_capsule_verify.py -k da --maxfail=1
 ```
@@ -99,7 +144,7 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_capsule_verify.py -k da --max
 - `docs/hssa_da_protocol.md` – DA sampling protocol and guarantees
 - `docs/stc_da_profiles.md` – DA policy profiles
 - `docs/security_model.md` – adversary model, binding points and security claims for Capsules + STC
-- `docs/guides/cli.md` – Capsule CLI (emit/verify/inspect) and `.cap` usage
+- `docs/guides/cli.md` – CapSeal CLI (emit/verify/inspect) and `.cap` usage
 - `docs/spec/10_cap_format.md` – portable `.cap` format and hermetic verification
 - `server/README.md` – FastAPI relay for CapsuleBench live event streams
 
@@ -110,11 +155,11 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/test_capsule_verify.py -k da --max
 
 ## CapsuleBench CLI
 
-The `capsule-bench` CLI wraps the pipeline, captures hardware/toolchain manifests, and assembles
+The `capseal-bench` CLI wraps the pipeline, captures hardware/toolchain manifests, and assembles
 the canonical `capsulepack.tgz` artifact.
 
-```
-. .venv/bin/capsule-bench run \
+```bash
+capseal-bench run \
     --backend geom \
     --policy policies/benchmark_policy_v1.json \
     --policy-id baseline_policy_v1 \
@@ -123,7 +168,7 @@ the canonical `capsulepack.tgz` artifact.
     --manifest-signer-id my_lab_manifest \
     --manifest-signer-key secrets/manifest_signer.hex
 
-. .venv/bin/capsule-bench pack --run-dir out/capsule_runs/run_YYYYMMDD_HHMMSS
+capseal-bench pack --run-dir out/capsule_runs/run_YYYYMMDD_HHMMSS
 ```
 
 `run` captures manifests and executes `scripts/run_pipeline.py`; `pack` enforces the canonical
@@ -131,8 +176,8 @@ capsulepack layout and writes `<run_id>.capsulepack.tgz`.
 
 For a fast signed demo run on a GPU-enabled laptop:
 
-```
-capsule-bench run \
+```bash
+capseal-bench run \
     --backend geom \
     --policy policies/demo_policy_v1.json \
     --policy-id demo_policy_v1 \
@@ -145,7 +190,7 @@ capsule-bench run \
 
 Then verify with policy + ACL enforcement:
 
-```
+```bash
 PYTHONPATH=. .venv/bin/python scripts/verify_capsule.py \
     out/capsule_runs/<run_id>/pipeline/strategy_capsule.json \
     --policy policies/demo_policy_v1.json \
@@ -158,10 +203,10 @@ PYTHONPATH=. .venv/bin/python scripts/verify_capsule.py \
 
 ### Manifest signatures and policy enforcement
 
-`capsule-bench run` writes `manifests/manifest_signature.json` whenever you
-provide `--manifest-signer-id` (or `CAPSULE_MANIFEST_SIGNER_ID`) together with
-`--manifest-signer-key` (or `CAPSULE_MANIFEST_SIGNER_KEY`). The signer id must
-match an entry in the verifier’s `config/manifest_signers.json`, and the key can
+`capseal-bench run` writes `manifests/manifest_signature.json` whenever you
+provide `--manifest-signer-id` (or `CAPSEAL_MANIFEST_SIGNER_ID`) together with
+`--manifest-signer-key` (or `CAPSEAL_MANIFEST_SIGNER_KEY`). The signer id must
+match an entry in the verifier's `config/manifest_signers.json`, and the key can
 be specified either as a path to a hex file or an inline hex string. Without a
 signature the capsule still verifies at `proof_only`, but policy enforcement
 fails closed with `E106_MANIFEST_SIGNATURE_MISSING`.
@@ -171,10 +216,10 @@ verifier config, and point `--manifest-signer-key` at the private key so the
 manifests are authenticated.
 
 If you run `scripts/run_pipeline.py` directly, collect manifests with
-`capsule_bench.manifests.collect_manifests` (or any equivalent process), then
+`capseal_bench.manifests.collect_manifests` (or any equivalent process), then
 sign them via:
 
-```
+```bash
 PYTHONPATH=. python scripts/sign_manifest.py ./manifests \
     --signer-id my_lab_manifest \
     --private-key secrets/manifest_signer.hex
@@ -182,7 +227,7 @@ PYTHONPATH=. python scripts/sign_manifest.py ./manifests \
 
 Trusted relay/manifest registries also need reproducible hashes. Use
 `scripts/compute_trust_roots.py` to print the SHA-256 root after editing
-`config/trusted_relays.json` or `config/manifest_signers.json`; the verifier’s
+`config/trusted_relays.json` or `config/manifest_signers.json`; the verifier's
 `--trusted-*-root` flags must match these values when you roll keys.
 
 ### Data availability (FULL)
@@ -191,10 +236,10 @@ For FULL verification, the verifier accepts a signed DA challenge (challenge v1)
 
 ### Streaming events to the relay
 
-`capsule-bench run` always writes a chained `events.jsonl`. To push those events to
+`capseal-bench run` always writes a chained `events.jsonl`. To push those events to
 the FastAPI relay while the prover runs, forward them to the ingest socket:
 
-```
+```bash
 PYTHONPATH=. .venv/bin/python scripts/relay_forward.py \
     out/capsule_runs/<run_id>/events.jsonl \
     ws://localhost:8000/ws/ingest/<run_id>
