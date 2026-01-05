@@ -25,9 +25,12 @@ MODULUS = (1 << 61) - 1
 try:
     import bef_rust
     _HAS_RUST = True
+    # Check for PyFriState (may be missing in stale builds)
+    _HAS_FRI_STATE = hasattr(bef_rust, "PyFriState")
 except ImportError:
     bef_rust = None  # type: ignore
     _HAS_RUST = False
+    _HAS_FRI_STATE = False
 
 
 def _rust_proof_to_python(rust_proof: Any) -> VCBatchProof:
@@ -119,7 +122,7 @@ def _build_layers(
     if fri_cfg.domain_size & (fri_cfg.domain_size - 1):
         raise ValueError("domain size must be a power of two")
 
-    if use_rust and _HAS_RUST:
+    if use_rust and _HAS_RUST and _HAS_FRI_STATE:
         return _build_layers_rust(fri_cfg, vc, base_evals, base_commitment, skip_python_commit)
     else:
         return _build_layers_python(fri_cfg, vc, base_evals, base_commitment)
@@ -211,38 +214,51 @@ def _build_layers_and_state_rust(
         chunk_tree_arity=chunk_tree_arity,
     )
 
-    # Use pure-Rust proving loop
-    # This derives beta internally using SHA256 matches _derive_beta
-    proof_results = state.prove_all(fri_cfg.num_rounds, chunk_len, chunk_tree_arity)
+    # Check if prove_all is available (newer API)
+    _has_prove_all = hasattr(state, "prove_all")
 
-    # Reconstruct layers info from results
-    # We need to compute beta here locally just to verify/store in FRILayerInfo
     current_commit = commit
-    for round_idx, res in enumerate(proof_results):
-        # Derive beta to store in layer info (must match Rust's internal beta)
-        beta = _derive_beta(current_commit.root, round_idx)
-        
-        # The layer we just folded FROM is 'current_commit'
-        # Its length was state.len() BEFORE the fold.
-        # But 'res' is the result of folding.
-        # Length of layer[i] is result[i-1].length (or initial).
-        # Wait, FRILayer[i] stores commitment to layer i.
-        
-        # We append info about layer i
-        layers.append(FRILayerInfo(commitment=current_commit, beta=beta, length=current_commit.length))
-        
-        # Prepare for next layer (which is result of this fold)
-        rust_root = bytes.fromhex(res.root_hex)
-        current_commit = VCCommitment(
-            root=rust_root,
-            length=res.length,
-            chunk_len=chunk_len,
-            num_chunks=res.num_chunks,
-            challenges=[],
-            sketches=[],
-            powers=[],
-            chunk_tree_arity=chunk_tree_arity,
-        )
+    if _has_prove_all:
+        # Use pure-Rust proving loop (faster)
+        # This derives beta internally using SHA256 matching _derive_beta
+        proof_results = state.prove_all(fri_cfg.num_rounds, chunk_len, chunk_tree_arity)
+
+        # Reconstruct layers info from results
+        for round_idx, res in enumerate(proof_results):
+            beta = _derive_beta(current_commit.root, round_idx)
+            layers.append(FRILayerInfo(commitment=current_commit, beta=beta, length=current_commit.length))
+
+            # Prepare for next layer (which is result of this fold)
+            rust_root = bytes.fromhex(res.root_hex)
+            current_commit = VCCommitment(
+                root=rust_root,
+                length=res.length,
+                chunk_len=chunk_len,
+                num_chunks=res.num_chunks,
+                challenges=[],
+                sketches=[],
+                powers=[],
+                chunk_tree_arity=chunk_tree_arity,
+            )
+    else:
+        # Fallback: iterative fold_commit_and_cache (older API, same correctness)
+        for round_idx in range(fri_cfg.num_rounds):
+            beta = _derive_beta(current_commit.root, round_idx)
+            layers.append(FRILayerInfo(commitment=current_commit, beta=beta, length=current_commit.length))
+
+            # Fold and commit using older API
+            res = state.fold_commit_and_cache(beta, chunk_len, chunk_tree_arity=chunk_tree_arity)
+            rust_root = bytes.fromhex(res.root_hex)
+            current_commit = VCCommitment(
+                root=rust_root,
+                length=res.length,
+                chunk_len=chunk_len,
+                num_chunks=res.num_chunks,
+                challenges=[],
+                sketches=[],
+                powers=[],
+                chunk_tree_arity=chunk_tree_arity,
+            )
 
     # last layer commitment
     layers.append(FRILayerInfo(commitment=current_commit, beta=0, length=current_commit.length))
@@ -269,7 +285,7 @@ def fri_prove(
     """
     # Build layers (and get Rust state if using Rust)
     rust_state = None
-    if use_rust and _HAS_RUST:
+    if use_rust and _HAS_RUST and _HAS_FRI_STATE:
         layers, rust_state = _build_layers_and_state_rust(
             fri_cfg, vc, base_evals, base_commitment, skip_python_commit=True
         )
