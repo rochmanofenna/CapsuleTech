@@ -217,6 +217,7 @@ def create_cap_file(
     archive_path: Path | None = None,
     signatures_path: Path | None = None,
     policy_path: Path | None = None,
+    manifests_path: Path | None = None,
 ) -> CapManifest:
     """Create a .cap archive from capsule components.
 
@@ -227,6 +228,7 @@ def create_cap_file(
         archive_path: Optional path to row archive directory
         signatures_path: Optional path to signatures directory
         policy_path: Optional path to policy file
+        manifests_path: Optional path to manifests directory (for policy enforcement)
 
     Returns:
         The manifest written to the archive
@@ -364,6 +366,11 @@ def create_cap_file(
         # Copy policy if present
         if policy_path and policy_path.exists():
             shutil.copy2(policy_path, pack_dir / "policy.json")
+
+        # Copy manifests directory if present (for policy enforcement)
+        if manifests_path and manifests_path.is_dir():
+            dest = pack_dir / "manifests"
+            shutil.copytree(manifests_path, dest)
 
         # Update manifest with final values
         (pack_dir / "manifest.json").write_text(

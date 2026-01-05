@@ -84,8 +84,27 @@ def _find_archive(artifacts_dir: Path) -> Path | None:
 @click.option(
     "--capsule",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
+    required=False,
     help="Path to capsule.json file",
+)
+@click.option(
+    "--source",
+    type=click.Path(exists=True, path_type=Path),
+    help=(
+        "Source path to infer from (run directory or capsule folder). "
+        "If a directory, the command will look for one of: "
+        "capsule.json, capsule/capsule.json, pipeline/strategy_capsule.json. "
+        "If a file, it must be a capsule JSON."
+    ),
+)
+@click.option(
+    "--receipt",
+    type=click.Path(exists=True, path_type=Path),
+    help=(
+        "Alias for --source (for backward compatibility). Provide a directory "
+        "containing a capsule (e.g., fixtures/golden_run_latest/capsule) or a "
+        "run pipeline directory (…/pipeline)."
+    ),
 )
 @click.option(
     "--out",
@@ -120,14 +139,22 @@ def _find_archive(artifacts_dir: Path) -> Path | None:
     default=BINARY_ARCHIVE_THRESHOLD,
     help=f"Chunk count threshold for binary archive format (default: {BINARY_ARCHIVE_THRESHOLD})",
 )
+@click.option(
+    "--manifests",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Manifests directory to include (for policy_enforced/DA verification)",
+)
 def emit_command(
-    capsule: Path,
+    capsule: Path | None,
     out: Path,
     artifacts: Path | None,
     archive: Path | None,
     policy: Path | None,
     profile: str,
     binary_threshold: int,
+    manifests: Path | None,
+    source: Path | None,
+    receipt: Path | None,
 ) -> None:
     """Generate a portable verification artifact (.cap file).
 
@@ -143,9 +170,50 @@ def emit_command(
     - archive/: Row archive (if provided, for DA mode)
     - signatures/: Detached signatures (if present)
     - policy.json: Policy file (if provided)
+    - manifests/: Hardware/toolchain manifests (if provided, for policy enforcement)
 
     Archive format auto-switches to binary when chunk count exceeds threshold.
     """
+    # Infer capsule/artifacts from --source/--receipt if provided
+    src = source or receipt
+    if capsule is None and src is not None:
+        def _candidate_capsule(p: Path) -> Path | None:
+            # Accept exact file
+            if p.is_file():
+                name = p.name.lower()
+                if name.endswith("capsule.json") or name == "strategy_capsule.json":
+                    return p
+                return None
+            # Directory candidates
+            for rel in (
+                "capsule.json",
+                "capsule/capsule.json",
+                "pipeline/strategy_capsule.json",
+                "strategy_capsule.json",
+            ):
+                c = p / rel
+                if c.exists() and c.is_file():
+                    return c
+            return None
+
+        cap_guess = _candidate_capsule(src)
+        if not cap_guess:
+            click.echo(
+                "Error: Could not locate capsule JSON under --source/--receipt. "
+                "Looked for: capsule.json, capsule/capsule.json, "
+                "pipeline/strategy_capsule.json, strategy_capsule.json",
+                err=True,
+            )
+            sys.exit(2)
+        capsule = cap_guess
+        # If artifacts not provided, default to capsule parent
+        if artifacts is None:
+            artifacts = capsule.parent
+
+    if capsule is None:
+        click.echo("Error: please provide --capsule or --source/--receipt", err=True)
+        sys.exit(2)
+
     # Find proof file
     proof_path = None
     signatures_path = None
@@ -191,6 +259,7 @@ def emit_command(
             archive_path=archive,
             signatures_path=signatures_path,
             policy_path=policy,
+            manifests_path=manifests,
         )
     except Exception as e:
         click.echo(f"Error creating .cap file: {e}", err=True)

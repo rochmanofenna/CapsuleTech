@@ -231,10 +231,11 @@ def _verify_capsule(
             extracted_manifests = extract_dir / "manifests"
             if manifest_root is None and extracted_manifests.exists():
                 manifest_root = extracted_manifests
-                if not policy_path:
-                    extracted_policy = extract_dir / "policy.json"
-                    if extracted_policy.exists():
-                        policy_path = extracted_policy
+            # Policy extraction independent of manifests
+            if not policy_path:
+                extracted_policy = extract_dir / "policy.json"
+                if extracted_policy.exists():
+                    policy_path = extracted_policy
             return _verify_capsule_json(
                 capsule_json,
                 mode=mode,
