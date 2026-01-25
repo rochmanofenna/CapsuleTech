@@ -4,41 +4,65 @@
 namespace enn {
 
 struct CollapseCache { 
-    Vec logits; 
+    Vec scores; 
     Vec alpha; 
+    Vec collapsed;
+    Vec gated;
+    F temperature = 1.0;
     
     CollapseCache() = default;
-    CollapseCache(int k) : logits(Vec::Zero(k)), alpha(Vec::Zero(k)) {}
+    CollapseCache(int k) : scores(Vec::Zero(k)), alpha(Vec::Zero(k)),
+                           collapsed(Vec::Zero(k)), gated(Vec::Zero(k)) {}
 };
 
 struct Collapse {
-    Mat Wg;  // [k x k] attention weights
-    int k;   // entanglement dimension
+    Mat Wq;         // [k x k] attention query weights
+    Vec Wout;       // [k] projection weights
+    F bout = 0.0;   // scalar bias for output
+    F log_temp;     // learned log-temperature
+    int k;          // entanglement dimension
     
     explicit Collapse(int k_, unsigned seed = 123);
     
-    // Numerically stable softmax
+    // Numerically stable softmax helper
     Vec softmax(const Vec& z) const;
+    Vec softmax_jacobian_matvec(const Vec& alpha, const Vec& vec) const;
     
-    // Forward pass: alpha = softmax(Wg * psi), output = alpha^T * psi
+    // Forward pass returning scalar prediction
     F forward(const Vec& psi, CollapseCache& cache) const;
     
-    // Backward pass: given dL/dpred, compute dL/dpsi and dL/dWg
-    // Uses Jacobian J = diag(alpha) - alpha * alpha^T
-    void backward(F dL_dpred, const Vec& psi, const CollapseCache& cache, 
-                  Vec& dpsi, Mat& dWg) const;
-    
-    // Multi-head collapse (optional extension)
-    struct MultiHead {
-        std::vector<Mat> heads;  // [num_heads][k x k]
-        Mat Wout;               // [1 x num_heads] combination weights
-        
-        MultiHead(int k, int num_heads, unsigned seed = 456);
-        F forward(const Vec& psi, std::vector<CollapseCache>& caches) const;
-        void backward(F dL_dpred, const Vec& psi, 
-                      const std::vector<CollapseCache>& caches,
-                      Vec& dpsi, std::vector<Mat>& dheads, Mat& dWout) const;
+    struct Grads {
+        Mat dWq;
+        Vec dWout;
+        F dbias = 0.0;
+        F dlog_temp = 0.0;
+
+        explicit Grads(int k) : dWq(Mat::Zero(k, k)), dWout(Vec::Zero(k)) {}
+
+        void zero() {
+            dWq.setZero();
+            dWout.setZero();
+            dbias = 0.0;
+            dlog_temp = 0.0;
+        }
+
+        void add_scaled(const Grads& other, F scale) {
+            dWq += scale * other.dWq;
+            dWout += scale * other.dWout;
+            dbias += scale * other.dbias;
+            dlog_temp += scale * other.dlog_temp;
+        }
+
+        void scale(F s) {
+            dWq *= s;
+            dWout *= s;
+            dbias *= s;
+            dlog_temp *= s;
+        }
     };
+    
+    void backward(F dL_dpred, const Vec& psi, const CollapseCache& cache,
+                  Vec& dpsi, Grads& grads) const;
 };
 
 } // namespace enn

@@ -1,8 +1,16 @@
 # Simple Makefile for ENN C++ (without CMake)
 
-CXX = g++
-CXXFLAGS = -std=c++17 -O3 -march=native -ffast-math -Wall -Wextra -Iinclude -fopenmp
-LDFLAGS = -fopenmp 
+CXX ?= g++
+CXXFLAGS_BASE = -std=c++17 -O3 -march=native -Wall -Wextra -Iinclude
+
+ifeq ($(DETERMINISTIC),1)
+    $(info Building deterministic inference binaries (no fast-math, single-thread))
+    CXXFLAGS = $(CXXFLAGS_BASE) -fno-fast-math -ffp-contract=off -DEIGEN_DONT_PARALLELIZE -DENN_DETERMINISTIC
+    LDFLAGS =
+else
+    CXXFLAGS = $(CXXFLAGS_BASE) -ffast-math -fopenmp
+    LDFLAGS = -fopenmp
+endif
 
 # Try to find Eigen
 EIGEN_PATHS = third_party/eigen /usr/include/eigen3 /usr/local/include/eigen3 /opt/homebrew/include/eigen3 \
@@ -21,11 +29,13 @@ endif
 
 # Source files
 SRCDIR = src
-SOURCES = $(SRCDIR)/cell.cpp $(SRCDIR)/collapse.cpp $(SRCDIR)/regularizers.cpp $(SRCDIR)/data.cpp $(SRCDIR)/trainer.cpp
+SOURCES = $(SRCDIR)/cell.cpp $(SRCDIR)/collapse.cpp $(SRCDIR)/frontend.cpp $(SRCDIR)/regularizers.cpp $(SRCDIR)/data.cpp $(SRCDIR)/trainer.cpp $(SRCDIR)/calibrator.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 
 # Applications
-APPS = apps/committor_train apps/seq_demo apps/seq_demo_bptt apps/seq_debug apps/bicep_to_enn
+# Note: committor_train demo is excluded from default build due to API drift.
+# You can build it explicitly by invoking the target directly if you maintain it.
+APPS = apps/seq_demo apps/seq_demo_bptt apps/seq_debug apps/bicep_to_enn
 
 # Tests  
 TESTS = tests/test_softmax tests/test_psd tests/test_gradcheck tests/test_bptt_gradcheck
@@ -38,6 +48,7 @@ all: $(APPS) $(TESTS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Applications
+# Deprecated from default build; kept for reference only
 apps/committor_train: apps/committor_train.cpp $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
@@ -76,10 +87,7 @@ test: $(TESTS)
 	@echo "All tests passed!"
 
 # Demo target
-demo: apps/committor_train apps/seq_demo_bptt
-	@echo "Running committor training demo..."
-	./apps/committor_train
-	@echo ""
+demo: apps/seq_demo_bptt
 	@echo "Running BPTT sequence demo..."  
 	./apps/seq_demo_bptt
 
@@ -95,4 +103,8 @@ check:
 	@echo 'int main() { Eigen::MatrixXd m(2,2); m << 1,2,3,4; std::cout << "Eigen works!" << std::endl; return 0; }' >> test_eigen.cpp
 	@$(CXX) $(CXXFLAGS) test_eigen.cpp -o test_eigen $(LDFLAGS) && ./test_eigen && rm test_eigen test_eigen.cpp || echo "Eigen test failed - please install Eigen3"
 
-.PHONY: all test demo clean check
+.PHONY: all test demo clean check deterministic
+
+deterministic:
+	@$(MAKE) clean >/dev/null
+	@$(MAKE) DETERMINISTIC=1 apps/bicep_to_enn

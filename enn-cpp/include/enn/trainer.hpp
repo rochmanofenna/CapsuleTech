@@ -1,6 +1,7 @@
 #pragma once
 #include "cell.hpp"
 #include "collapse.hpp"
+#include "frontend.hpp"
 #include "optim.hpp"
 #include "data.hpp"
 #include "regularizers.hpp"
@@ -21,6 +22,11 @@ struct TrainConfig {
     F reg_eta = 1e-6;         // L2 parameter penalty
     bool verbose = true;
     int print_every = 10;
+    int frontend_filters = 32;
+    int frontend_temporal_kernel = 5;
+    int frontend_depth_kernel = 3;
+    int embed_dim = 32;
+    bool use_layer_norm = true;
     
     // BPTT settings
     int bptt_length = -1;     // -1 = full sequence, >0 = truncated BPTT
@@ -32,17 +38,61 @@ struct OptimizerState {
     // Cell parameter states
     Mat m_Wx, v_Wx, m_Wh, v_Wh, m_L, v_L;
     Vec m_b, v_b;
-    F m_lambda = 0, v_lambda = 0;
-    
+    Vec m_ln_gamma, v_ln_gamma;
+    Vec m_ln_beta, v_ln_beta;
+    F m_log_lambda = 0, v_log_lambda = 0;
+
     // Collapse parameter states  
-    Mat m_Wg, v_Wg;
-    
-    OptimizerState(int k, int input_dim, int hidden_dim) {
-        m_Wx = Mat::Zero(k, input_dim); v_Wx = Mat::Zero(k, input_dim);
+    Mat m_Wq, v_Wq;
+    Vec m_Wout, v_Wout;
+    F m_collapse_bias = 0, v_collapse_bias = 0;
+    F m_log_temp = 0, v_log_temp = 0;
+
+    // Frontend parameter states
+    Mat m_front_temporal, v_front_temporal;
+    Vec m_front_temporal_b, v_front_temporal_b;
+    Mat m_front_spatial, v_front_spatial;
+    Vec m_front_spatial_b, v_front_spatial_b;
+    Mat m_front_depthwise, v_front_depthwise;
+    Vec m_front_depthwise_b, v_front_depthwise_b;
+    Mat m_front_proj, v_front_proj;
+    Vec m_front_proj_b, v_front_proj_b;
+
+    OptimizerState(int k, int embed_dim, int hidden_dim,
+                   int frontend_filters, int raw_input_dim,
+                   int temporal_kernel, int depth_kernel) {
+        m_Wx = Mat::Zero(k, embed_dim); v_Wx = Mat::Zero(k, embed_dim);
         m_Wh = Mat::Zero(k, hidden_dim); v_Wh = Mat::Zero(k, hidden_dim);
         m_L = Mat::Zero(k, k); v_L = Mat::Zero(k, k);
         m_b = Vec::Zero(k); v_b = Vec::Zero(k);
-        m_Wg = Mat::Zero(k, k); v_Wg = Mat::Zero(k, k);
+        m_ln_gamma = Vec::Zero(k); v_ln_gamma = Vec::Zero(k);
+        m_ln_beta = Vec::Zero(k); v_ln_beta = Vec::Zero(k);
+        m_log_lambda = 0.0; v_log_lambda = 0.0;
+        m_Wq = Mat::Zero(k, k); v_Wq = Mat::Zero(k, k);
+        m_Wout = Vec::Zero(k); v_Wout = Vec::Zero(k);
+        m_collapse_bias = 0.0; v_collapse_bias = 0.0;
+        m_log_temp = 0.0; v_log_temp = 0.0;
+
+        int temporal_cols = raw_input_dim * temporal_kernel;
+        m_front_temporal = Mat::Zero(frontend_filters, temporal_cols);
+        v_front_temporal = Mat::Zero(frontend_filters, temporal_cols);
+        m_front_temporal_b = Vec::Zero(frontend_filters);
+        v_front_temporal_b = Vec::Zero(frontend_filters);
+
+        m_front_spatial = Mat::Zero(frontend_filters, frontend_filters);
+        v_front_spatial = Mat::Zero(frontend_filters, frontend_filters);
+        m_front_spatial_b = Vec::Zero(frontend_filters);
+        v_front_spatial_b = Vec::Zero(frontend_filters);
+
+        m_front_depthwise = Mat::Zero(frontend_filters, depth_kernel);
+        v_front_depthwise = Mat::Zero(frontend_filters, depth_kernel);
+        m_front_depthwise_b = Vec::Zero(frontend_filters);
+        v_front_depthwise_b = Vec::Zero(frontend_filters);
+
+        m_front_proj = Mat::Zero(embed_dim, frontend_filters);
+        v_front_proj = Mat::Zero(embed_dim, frontend_filters);
+        m_front_proj_b = Vec::Zero(embed_dim);
+        v_front_proj_b = Vec::Zero(embed_dim);
     }
 };
 
@@ -55,18 +105,25 @@ public:
         std::vector<CollapseCache> collapse_caches;
         std::vector<Vec> psi_history;
         std::vector<Vec> h_history;
+        std::vector<Vec> embeddings;
+        std::vector<Vec> embed_grads;
+        FrontendCache frontend_cache;
         Vec initial_psi, initial_h;
+        std::vector<F> predictions;
     };
 
 private:
+    std::unique_ptr<SpatialTemporalCNN> frontend_;
     std::unique_ptr<EntangledCell> cell_;
     std::unique_ptr<Collapse> collapse_;
     std::unique_ptr<AdamW> optimizer_;
     std::unique_ptr<OptimizerState> opt_state_;
     TrainConfig config_;
+    int embed_dim_ = 0;
+    int raw_input_dim_ = 0;
     
 public:
-    SequenceTrainer(int k, int input_dim, int hidden_dim, F lambda, 
+    SequenceTrainer(int k, int raw_input_dim, int embed_dim, int hidden_dim, F lambda, 
                    const TrainConfig& config = TrainConfig{});
     
     // Train on sequence batch with full BPTT
@@ -77,22 +134,26 @@ public:
     
     // Forward pass through a single sequence
     std::vector<F> forward_sequence(const std::vector<Vec>& sequence, 
-                                   Vec* final_psi = nullptr, Vec* final_h = nullptr) const;
+                                   Vec* final_psi = nullptr, Vec* final_h = nullptr,
+                                   Vec* final_alpha = nullptr, F* final_temperature = nullptr) const;
     
     // Train with proper BPTT backpropagation
     F train_sequence(const std::vector<Vec>& inputs, const std::vector<F>& targets,
                     SequenceCache& cache);
     
     // Backprop through time  
-    void backward_through_time(const std::vector<F>& targets,
-                              const std::vector<F>& predictions,
-                              const SequenceCache& cache,
+    void backward_through_time(const std::vector<Vec>& inputs,
+                              const std::vector<F>& targets,
+                              SequenceCache& cache,
                               EntangledCell::Grads& cell_grads,
-                              Mat& collapse_grads);
+                              FrontendGrads& front_grads,
+                              Collapse::Grads& collapse_grads);
     
     // Apply gradients with regularization
     void apply_gradients(const EntangledCell::Grads& cell_grads,
-                        const Mat& collapse_grads, F reg_loss);
+                        const FrontendGrads& front_grads,
+                        const Collapse::Grads& collapse_grads,
+                        F reg_loss);
     
     // Compute regularization loss
     F compute_regularization_loss();
@@ -100,38 +161,6 @@ public:
     // Learning rate control
     void set_learning_rate(F lr) { optimizer_->lr = lr; }
     F get_learning_rate() const { return optimizer_->lr; }
-    
-    // Getters
-    const EntangledCell& get_cell() const { return *cell_; }
-    const Collapse& get_collapse() const { return *collapse_; }
-    const TrainConfig& get_config() const { return config_; }
-};
-
-// Batch trainer for non-sequential data
-class BatchTrainer {
-private:
-    std::unique_ptr<EntangledCell> cell_;
-    std::unique_ptr<Collapse> collapse_;
-    std::unique_ptr<AdamW> optimizer_;
-    std::unique_ptr<OptimizerState> opt_state_;
-    TrainConfig config_;
-    
-public:
-    BatchTrainer(int k, int input_dim, int hidden_dim, F lambda,
-                const TrainConfig& config = TrainConfig{});
-    
-    // Train on batch data
-    F train_epoch(const Batch& data);
-    
-    // Evaluate on batch data
-    F evaluate(const Batch& data, Metrics& metrics);
-    
-    // Single forward pass
-    F forward(const Vec& input, Vec* psi_out = nullptr);
-    
-    // Apply gradients
-    void apply_gradients(const EntangledCell::Grads& cell_grads,
-                        const Mat& collapse_grads, F reg_loss);
     
     // Getters
     const EntangledCell& get_cell() const { return *cell_; }

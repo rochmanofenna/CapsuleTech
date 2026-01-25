@@ -10,6 +10,7 @@ find_package(Eigen3 REQUIRED)
 add_library(enn STATIC
     src/cell.cpp
     src/collapse.cpp
+    src/frontend.cpp
     src/regularizers.cpp
     src/optim.cpp
     src/data.cpp

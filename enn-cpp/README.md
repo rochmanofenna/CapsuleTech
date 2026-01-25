@@ -49,7 +49,23 @@ make all  # Builds everything including tests
 make test  # Validates all gradients and core functionality
 ```
 
-### 3. Run Demos
+### 3. Deterministic Inference Build
+```bash
+make deterministic           # rebuilds apps/bicep_to_enn with deterministic flags
+export OMP_NUM_THREADS=1     # ensure single-thread runtime
+export MKL_NUM_THREADS=1
+```
+
+The deterministic target disables OpenMP, removes `-ffast-math`, and defines `EIGEN_DONT_PARALLELIZE`/`ENN_DETERMINISTIC` so inference binaries are reproducible on the same host/toolchain.
+
+### 4. Fit a Calibrator
+```bash
+python scripts/fit_calibrator.py telemetry.csv calibrator.json \
+  --model-id your_model --calibrator-id demo_platt
+```
+The script reads a telemetry CSV (with `margin`/`target`) and emits a `enn_calibrator_v1` JSON containing Platt parameters plus reliability curves, ECE, and Brier score. Point `apps/bicep_to_enn` at the resulting file with `--calibrator` to apply the calibrated reliability mapping.
+
+### 5. Run Demos
 ```bash
 make demo  # Runs committor training + sequence learning demos
 ```
