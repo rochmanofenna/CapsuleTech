@@ -1,5 +1,5 @@
 use crate::{RunManifest, write_ensemble_with_manifest};
-use bicep_core::{State, Calc, EulerMaruyama, Milstein, HeunStratonovich};
+use bicep_core::{State, Calc, EulerMaruyama, Milstein, HeunStratonovich, NoiseConfig, ShockType};
 use bicep_models::{BrownianMotion, GeometricBrownianMotion, OrnsteinUhlenbeck, DoubleWell};
 use bicep_sampler::{Sampler, PathSpec, Boundary, Stopping};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -130,6 +130,23 @@ pub async fn run_sample_command(
     } else {
         json!({})
     };
+
+    // Phase 1/2 modelling controls (recognized but not all used yet in core engine)
+    let returns_space = model_params.get("returns_space").and_then(|v| v.as_bool());
+    let ewma_alpha = model_params.get("ewma_alpha").and_then(|v| v.as_f64());
+    let shock_type = model_params.get("shock_type").and_then(|v| v.as_str()).unwrap_or("gaussian");
+    let nu = model_params.get("nu").and_then(|v| v.as_f64());
+    let bootstrap_block = model_params.get("bootstrap_block").and_then(|v| v.as_u64()).map(|u| u as usize);
+    let regime_percentile = model_params.get("regime_percentile").and_then(|v| v.as_f64());
+
+    println!("\nModelling controls (requested):");
+    println!("  returns_space:    {:?}", returns_space);
+    println!("  ewma_alpha:       {:?}", ewma_alpha);
+    println!("  shock_type:       {}", shock_type);
+    println!("  nu:               {:?}", nu);
+    println!("  bootstrap_block:  {:?}", bootstrap_block);
+    println!("  regime_percentile:{:?}", regime_percentile);
+    println!("  note: Student‑t noise and EWMA scaling are active; block bootstrap/regime split are reserved for future patches.");
     
     // Create path specification
     let spec = PathSpec::new(steps, dt, save_stride);
@@ -159,6 +176,15 @@ pub async fn run_sample_command(
         &spec,
     );
     
+    // Build optional noise config
+    let noise_cfg = {
+        let shock = match shock_type.to_lowercase().as_str() {
+            "student_t" | "student-t" | "studentt" => ShockType::StudentT,
+            _ => ShockType::Gaussian,
+        };
+        Some(NoiseConfig { shock_type: shock, nu, ewma_alpha })
+    };
+
     // Run simulation based on model type
     let ensemble = match model {
         ModelType::Brownian => {
@@ -166,7 +192,7 @@ pub async fn run_sample_command(
                 .and_then(|v| v.as_f64())
                 .unwrap_or(1.0);
             let model = BrownianMotion::new(sigma);
-            run_simulation(integrator, model.clone(), model, calc_enum, &spec, paths, seed)?
+            run_simulation(integrator, model.clone(), model, calc_enum, &spec, paths, seed, noise_cfg.clone())?
         },
         
         ModelType::GeometricBrownianMotion => {
@@ -176,7 +202,7 @@ pub async fn run_sample_command(
             
             let model = GeometricBrownianMotion::new(mu, sigma);
             let x0s = vec![State::new(vec![s0]); paths];
-            run_simulation_with_x0s(integrator, model.clone(), model, calc_enum, &spec, &x0s, seed)?
+            run_simulation_with_x0s(integrator, model.clone(), model, calc_enum, &spec, &x0s, seed, noise_cfg.clone())?
         },
         
         ModelType::OrnsteinUhlenbeck => {
@@ -187,7 +213,7 @@ pub async fn run_sample_command(
             
             let model = OrnsteinUhlenbeck::new(theta, mu, sigma);
             let x0s = vec![State::new(vec![x0]); paths];
-            run_simulation_with_x0s(integrator, model.clone(), model, calc_enum, &spec, &x0s, seed)?
+            run_simulation_with_x0s(integrator, model.clone(), model, calc_enum, &spec, &x0s, seed, noise_cfg.clone())?
         },
         
         ModelType::DoubleWell => {
@@ -198,7 +224,7 @@ pub async fn run_sample_command(
             
             let model = DoubleWell::new(a, b, temperature);
             let x0s = vec![State::new(vec![x0]); paths];
-            run_simulation_with_x0s(integrator, model.clone(), model, calc_enum, &spec, &x0s, seed)?
+            run_simulation_with_x0s(integrator, model.clone(), model, calc_enum, &spec, &x0s, seed, noise_cfg.clone())?
         },
     };
     
@@ -245,13 +271,14 @@ fn run_simulation<D, S>(
     spec: &PathSpec,
     n_paths: usize,
     seed: u64,
+    noise_cfg: Option<NoiseConfig>,
 ) -> anyhow::Result<bicep_sampler::Ensemble>
 where
     D: bicep_core::Drift + Clone,
     S: bicep_core::Diffusion + Clone,
 {
     let x0s = vec![State::new(vec![0.0]); n_paths];
-    run_simulation_with_x0s(integrator, drift, diffusion, calc, spec, &x0s, seed)
+    run_simulation_with_x0s(integrator, drift, diffusion, calc, spec, &x0s, seed, noise_cfg)
 }
 
 /// Simulation runner with custom initial conditions
@@ -263,6 +290,7 @@ fn run_simulation_with_x0s<D, S>(
     spec: &PathSpec,
     x0s: &[State],
     seed: u64,
+    noise_cfg: Option<NoiseConfig>,
 ) -> anyhow::Result<bicep_sampler::Ensemble>
 where
     D: bicep_core::Drift + Clone,
@@ -273,17 +301,17 @@ where
     
     match integrator {
         IntegratorType::EulerMaruyama => {
-            let sampler = Sampler::new(EulerMaruyama, drift, diffusion);
+            let sampler = Sampler::new(EulerMaruyama, drift, diffusion).with_noise_config(noise_cfg);
             Ok(sampler.run_paths(calc, spec, x0s, &boundary, &stopping, seed))
         },
         
         IntegratorType::Milstein => {
-            let sampler = Sampler::new(Milstein, drift, diffusion);
+            let sampler = Sampler::new(Milstein, drift, diffusion).with_noise_config(noise_cfg);
             Ok(sampler.run_paths(calc, spec, x0s, &boundary, &stopping, seed))
         },
         
         IntegratorType::HeunStratonovich => {
-            let sampler = Sampler::new(HeunStratonovich, drift, diffusion);
+            let sampler = Sampler::new(HeunStratonovich, drift, diffusion).with_noise_config(noise_cfg);
             Ok(sampler.run_paths(calc, spec, x0s, &boundary, &stopping, seed))
         },
     }

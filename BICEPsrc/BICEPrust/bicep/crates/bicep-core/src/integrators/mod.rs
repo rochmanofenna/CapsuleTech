@@ -1,11 +1,11 @@
 pub mod euler_maruyama;
+pub mod helpers;
 pub mod heun_stratonovich;
 pub mod milstein;
-pub mod helpers;
 
-use crate::{State, Time};
-use crate::drift::Drift;
 use crate::diffusion::Diffusion;
+use crate::drift::Drift;
+use crate::{State, Time};
 
 pub use euler_maruyama::EulerMaruyama;
 pub use heun_stratonovich::HeunStratonovich;

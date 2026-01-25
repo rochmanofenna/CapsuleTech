@@ -1,25 +1,27 @@
-pub mod state;
-pub mod drift;
 pub mod diffusion;
+pub mod drift;
 pub mod integrators;
-pub mod path;
-pub mod noise;
 pub mod measure;
+pub mod noise;
+pub mod path;
+pub mod seed;
+pub mod state;
 
 // Core types
 pub type F = f64;
+pub use noise::{NoiseGenerator, NoiseConfig, ShockType};
 pub use state::{State, Time};
-pub use noise::NoiseGenerator;
 
 // SDE traits
-pub use drift::Drift;
 pub use diffusion::Diffusion;
+pub use drift::Drift;
 
 // Integrators
-pub use integrators::{SdeIntegrator, Calc, EulerMaruyama, Milstein, HeunStratonovich};
+pub use integrators::{Calc, EulerMaruyama, HeunStratonovich, Milstein, SdeIntegrator};
 
 // Path and ensemble types
-pub use path::{Path, PathSpec, Ensemble};
+pub use path::{Ensemble, Path, PathSpec};
+pub use seed::{SeedIdentity, SeedSpec};
 
 // Convenience aliases for SDE-specific usage
 pub type SdePath = Path<State>;

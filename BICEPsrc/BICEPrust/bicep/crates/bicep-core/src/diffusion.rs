@@ -10,7 +10,7 @@ pub trait Diffusion: Send + Sync {
     fn sigma_jacobian(&self, _t: Time, _x: &State) -> Option<Vec<DMatrix<f64>>> {
         None
     }
-    
+
     /// Number of noise dimensions (columns in σ matrix)
     fn noise_dim(&self, t: Time, x: &State) -> usize {
         self.sigma(t, x).ncols()

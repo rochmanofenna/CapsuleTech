@@ -1,5 +1,5 @@
 use nalgebra::DVector;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 pub type Time = f64;
 
@@ -22,7 +22,7 @@ impl State {
 
 impl std::ops::Deref for State {
     type Target = DVector<f64>;
-    
+
     fn deref(&self) -> &Self::Target {
         &self.0
     }
