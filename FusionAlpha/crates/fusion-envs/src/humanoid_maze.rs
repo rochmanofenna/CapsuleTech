@@ -1,4 +1,7 @@
-use fusion_core::{Graph, NodeFeat, Edge, Priors, PriorSource, F};
+use fusion_core::{Graph, Edge, Priors, PriorSource, F};
+
+const ETA_MIN: F = 0.1;
+const ETA_MAX: F = 10.0;
 use fusion_core::priors::PriorBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -202,10 +205,11 @@ pub fn build_humanoid_priors(
     
     // Add ENN prior for current state
     if let Some(state) = enn_state {
-        let enn_source = PriorSource::from_enn(
+        let enn_source = PriorSource::from_enn_reliability(
             state.q_prior_enn,
-            state.severity,
-            state.bicep_confidence,
+            state.obs_reliability,
+            ETA_MIN,
+            ETA_MAX,
         );
         builder = builder.add_prior(current_node, enn_source);
     }

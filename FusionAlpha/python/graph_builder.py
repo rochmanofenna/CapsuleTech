@@ -8,6 +8,31 @@ import numpy as np
 from typing import Dict, Tuple, List, Optional
 from sklearn.neighbors import NearestNeighbors
 import json
+import hashlib
+
+
+def _hash_buffer(buffer: List[np.ndarray]) -> str:
+    if not buffer:
+        return "empty"
+    hasher = hashlib.blake2s()
+    for state in buffer:
+        hasher.update(np.asarray(state, dtype=np.float32).tobytes())
+    return hasher.hexdigest()
+
+
+def _serialize_graph(nodes: np.ndarray, edges: np.ndarray) -> Dict:
+    adjacency: Dict[int, List[Dict[str, float]]] = {}
+    for u, v, w in edges:
+        adjacency.setdefault(int(u), []).append({"v": int(v), "w": float(w)})
+    for neighbors in adjacency.values():
+        neighbors.sort(key=lambda item: (item["v"], item["w"]))
+    return {
+        "nodes": nodes.tolist(),
+        "edges": [
+            {"u": int(u), "v": int(v), "w": float(w)} for u, v, w in edges
+        ],
+        "adjacency": adjacency,
+    }
 
 
 class StateGraphBuilder:
@@ -25,6 +50,12 @@ class StateGraphBuilder:
         if len(self.state_buffer) > 10000:
             self.state_buffer = self.state_buffer[-5000:]
     
+    def _finalize_edges(self, edges: List[List[float]]) -> np.ndarray:
+        if not edges:
+            return np.zeros((0, 3), dtype=np.float32)
+        edges_sorted = sorted(edges, key=lambda e: (int(e[0]), int(e[1]), float(e[2])))
+        return np.array(edges_sorted, dtype=np.float32)
+    
     def build_graph(self, current_state: np.ndarray, 
                    goal_state: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, int, int]:
         """
@@ -37,6 +68,29 @@ class StateGraphBuilder:
             goal_idx: index of goal state in nodes (-1 if no goal)
         """
         raise NotImplementedError
+
+    def build_graph_with_artifacts(
+        self,
+        current_state: np.ndarray,
+        goal_state: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, int, int, Dict, Dict]:
+        nodes, edges, current_idx, goal_idx = self.build_graph(current_state, goal_state)
+        spec = {
+            "builder_type": self.__class__.__name__,
+            "params": self._builder_params(),
+            "buffer_hash": _hash_buffer(self.state_buffer),
+            "node_dim": int(nodes.shape[1]),
+        }
+        graph = _serialize_graph(nodes, edges)
+        graph["current_node"] = current_idx
+        graph["goal_node"] = goal_idx
+        return nodes, edges, current_idx, goal_idx, spec, graph
+
+    def _builder_params(self) -> Dict:
+        return {
+            "k_neighbors": self.k_neighbors,
+            "max_nodes": self.max_nodes,
+        }
 
 
 class HumanoidMazeGraphBuilder(StateGraphBuilder):
@@ -68,13 +122,18 @@ class HumanoidMazeGraphBuilder(StateGraphBuilder):
         if len(self.state_buffer) > 0:
             buffer_positions = np.array([s[:self.position_dim] for s in self.state_buffer])
             
-            # Find k nearest neighbors
-            nbrs = NearestNeighbors(n_neighbors=min(self.k_neighbors, len(buffer_positions)))
+            # Find k nearest neighbors deterministically
+            nbrs = NearestNeighbors(
+                n_neighbors=min(self.k_neighbors, len(buffer_positions)),
+                algorithm='brute',
+                metric='euclidean',
+                n_jobs=1
+            )
             nbrs.fit(buffer_positions)
             
-            distances, indices = nbrs.kneighbors([current_pos])
+            _, indices = nbrs.kneighbors([current_pos])
             
-            for idx in indices[0]:
+            for idx in sorted(indices[0]):
                 if len(nodes) < self.max_nodes:
                     nodes.append(self.state_buffer[idx])
                     node_positions.append(buffer_positions[idx])
@@ -101,9 +160,15 @@ class HumanoidMazeGraphBuilder(StateGraphBuilder):
                         edges.append([i, j, weight])
                         edges.append([j, i, weight])  # Bidirectional
         
-        edges = np.array(edges, dtype=np.float32) if edges else np.zeros((0, 3), dtype=np.float32)
+        edges = self._finalize_edges(edges)
         
         return nodes, edges, current_idx, goal_idx
+
+    def _builder_params(self) -> Dict:
+        return {
+            **super()._builder_params(),
+            "position_dim": self.position_dim,
+        }
 
 
 class AntSoccerGraphBuilder(StateGraphBuilder):
@@ -166,9 +231,17 @@ class AntSoccerGraphBuilder(StateGraphBuilder):
                     weight = np.exp(-dist / 0.5)
                     edges.append([i, j, weight])
         
-        edges = np.array(edges, dtype=np.float32) if edges else np.zeros((0, 3), dtype=np.float32)
+        edges = self._finalize_edges(edges)
         
         return nodes, edges, current_idx, goal_idx
+
+    def _builder_params(self) -> Dict:
+        return {
+            **super()._builder_params(),
+            "ant_pos_dim": self.ant_pos_dim,
+            "ball_pos_dim": self.ball_pos_dim,
+            "grid_span": 4.0,
+        }
 
 
 class PuzzleGraphBuilder(StateGraphBuilder):
@@ -276,9 +349,17 @@ class PuzzleGraphBuilder(StateGraphBuilder):
                     # All button presses have equal weight
                     edges.append([i, j, 1.0])
         
-        edges = np.array(edges, dtype=np.float32) if edges else np.zeros((0, 3), dtype=np.float32)
+        edges = self._finalize_edges(edges)
         
         return nodes, edges, current_idx, goal_idx
+
+    def _builder_params(self) -> Dict:
+        return {
+            **super()._builder_params(),
+            "width": self.width,
+            "height": self.height,
+            "n_lights": self.n_lights,
+        }
 
 
 # Factory function

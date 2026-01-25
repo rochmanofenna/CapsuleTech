@@ -2,6 +2,9 @@ use pyo3::prelude::*;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use fusion_core::*;
 
+const ETA_MIN: f32 = 0.1;
+const ETA_MAX: f32 = 10.0;
+
 /// Simplified Python bindings with working example
 #[pymodule]
 fn fusion_alpha(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
@@ -52,21 +55,35 @@ fn simple_propagate<'py>(
     q0[goal_node] = Some(1.0);
     eta[goal_node] = 1e9;
     
-    // ENN prior
-    q0[current_node] = Some(enn_q_prior);
-    eta[current_node] = 0.8;
-    
+    let fusion_state = FusionState::from_severity(enn_q_prior, severity, 0.0);
+    q0[current_node] = Some(fusion_state.q_prior_enn);
+    eta[current_node] = eta_from_reliability(fusion_state.obs_reliability);
+
     // Propagate
     let config = PropConfig {
         t_max,
         eps: 1e-4,
         use_parallel: true,
+        alpha_max: 6.0,
+        step_policy: StepPolicy::RiskScaled,
     };
     
-    let t_steps = 1 + ((severity * t_max as f32) as usize).min(t_max);
-    let q_values = propagate_committor(&graph, &q0, &eta, &config, t_steps);
+    let t_steps = fusion_state.propagation_steps(&config);
+    let q_values = propagate_committor(
+        &graph,
+        &q0,
+        &eta,
+        &config,
+        t_steps,
+        fusion_state.effective_risk(),
+    );
     
     Ok(PyArray1::from_vec(py, q_values))
+}
+
+fn eta_from_reliability(rel: f32) -> f32 {
+    let clamped = rel.clamp(0.0, 1.0);
+    ETA_MIN + (ETA_MAX - ETA_MIN) * clamped
 }
 
 /// Create a simple test graph

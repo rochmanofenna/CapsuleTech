@@ -30,9 +30,13 @@ fn main() -> anyhow::Result<()> {
     println!("Current node: {}, Goal node: {}", current_node, goal_node);
     
     // Mock ENN state (high uncertainty)
-    let enn_state = FusionState::new(0.6, 0.8, 0.7);  // q_prior=0.6, severity=0.8, confidence=0.7
-    println!("ENN state: q_prior={:.2}, severity={:.2}, confidence={:.2}", 
-             enn_state.q_prior_enn, enn_state.severity, enn_state.bicep_confidence);
+    let enn_state = FusionState::from_severity(0.6, 0.8, 0.7);
+    println!(
+        "ENN state: q_prior={:.2}, obs_reliability={:.2}, risk_aversion={:.2}",
+        enn_state.q_prior_enn,
+        enn_state.obs_reliability,
+        enn_state.risk_aversion
+    );
     
     // Build priors
     let priors = build_humanoid_priors(&graph, current_node, goal_node, Some(&enn_state), None);
@@ -44,14 +48,25 @@ fn main() -> anyhow::Result<()> {
         eps: 1e-4,
         use_parallel: true,
         alpha_max: 6.0,
+        step_policy: StepPolicy::RiskScaled,
     };
     
     // Severity-scaled propagation steps
-    let t_steps = enn_state.propagation_steps(prop_config.t_max);
-    println!("Propagation steps: {} (severity-scaled from max {})", t_steps, prop_config.t_max);
+    let t_steps = enn_state.propagation_steps(&prop_config);
+    println!(
+        "Propagation steps: {} (risk-scaled from max {})",
+        t_steps, prop_config.t_max
+    );
     
     // Propagate committor values
-    let q_values = propagate_committor(&graph, &priors.q0, &priors.eta, &prop_config, t_steps, enn_state.severity);
+    let q_values = propagate_committor(
+        &graph,
+        &priors.q0,
+        &priors.eta,
+        &prop_config,
+        t_steps,
+        enn_state.effective_risk(),
+    );
     println!("Computed committor values");
     
     // Display results
